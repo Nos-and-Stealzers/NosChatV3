@@ -31,6 +31,8 @@ import {
   Trash2,
   X,
   Pencil,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -46,6 +48,7 @@ import {
   createGuildChannel,
   createGuildCategory,
   deleteGuildChannel,
+  updateGuildChannel,
   leaveGuild,
   deleteGuild,
   markGuildChannelRead,
@@ -462,6 +465,32 @@ export function GuildView({
     }
   }
 
+  // Swaps this channel's position with its immediate up/down neighbor
+  // *within the same category group* (same list groupChannels() already
+  // sorts by position) — two PATCH calls, not a full drag-and-drop reorder,
+  // but enough to actually let you reorganize a channel list at all.
+  async function handleMoveChannel(channel: GuildChannel, direction: "up" | "down") {
+    if (!detail) return;
+    const groups = groupChannels(detail.categories, detail.channels);
+    const group = groups.find((g) => g.channels.some((c) => c.id === channel.id));
+    if (!group) return;
+    const idx = group.channels.findIndex((c) => c.id === channel.id);
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= group.channels.length) return;
+    const other = group.channels[swapIdx];
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await Promise.all([
+        updateGuildChannel(token, guildId, channel.id, { position: other.position }),
+        updateGuildChannel(token, guildId, other.id, { position: channel.position }),
+      ]);
+      await refreshDetail();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to reorder channel");
+    }
+  }
+
   const isOwner = detail?.owner_id === myId;
 
   async function handleLeaveOrDeleteGuild() {
@@ -749,6 +778,30 @@ export function GuildView({
                                 </span>
                               )}
                             </button>
+                            {canManageGuild && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleMoveChannel(ch, "up");
+                                }}
+                                title="Move up"
+                                className="flex-none rounded p-1 opacity-0 transition-opacity group-hover/channel:opacity-100 hover:text-[#F0A868]"
+                              >
+                                <ArrowUp className="size-3.5" />
+                              </button>
+                            )}
+                            {canManageGuild && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleMoveChannel(ch, "down");
+                                }}
+                                title="Move down"
+                                className="flex-none rounded p-1 opacity-0 transition-opacity group-hover/channel:opacity-100 hover:text-[#F0A868]"
+                              >
+                                <ArrowDown className="size-3.5" />
+                              </button>
+                            )}
                             {canManageGuild && (
                               <button
                                 onClick={(e) => {
