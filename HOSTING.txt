@@ -228,6 +228,110 @@ version):
       Same backend, WebSocket scheme: ws://localhost:4000/ws locally,
       wss://your-domain.example.com/ws in production.
 
+  NEXT_PUBLIC_ICE_SERVERS
+      Optional. JSON array of RTCIceServer objects for the WebRTC calling
+      feature (voice/video/screen-share). If unset, defaults to Google's
+      public STUN server (stun:stun.l.google.com:19302) — see SECTION 5b
+      below for when that's not enough and what to do about it.
+
+
+SECTION 5b — WEBRTC CALLING: STUN vs TURN, AND WHEN YOU NEED A TURN SERVER
+-------------------------------------------------------------------------
+NosChat's voice/video calls and screen sharing are pure peer-to-peer
+WebRTC (no SFU/media server — it's 1:1 only, matching the DM model).
+Signaling (who's calling whom, SDP offers/answers, ICE candidates) rides
+over the same WebSocket hub as everything else (see backend/auth-service/
+src/ws.rs — call_ring/call_offer/call_answer/call_ice_candidate/call_end/
+call_reject). The actual audio/video/screen bytes never touch your
+backend at all — they flow directly between the two browsers once a
+connection is established. That direct connection is the part STUN/TURN
+is about.
+
+What STUN does (the default, no setup required):
+  Two browsers on the internet usually can't just dial each other's
+  private IP addresses directly — they're behind NAT (your router). STUN
+  is a tiny, free service that tells each browser "here's what your
+  public IP:port looks like from the outside," so the two browsers can
+  exchange that info (via the signaling above) and connect directly.
+  This works for the large majority of home/office networks. The default
+  here (stun:stun.l.google.com:19302, a free public STUN server) is
+  perfectly fine for most calls and costs nothing.
+
+When STUN isn't enough:
+  Some networks (many corporate networks, some mobile carriers, "symmetric"
+  NAT configurations, CGNAT) block or mangle direct peer-to-peer
+  connections no matter what STUN tells you. If one or both callers are on
+  a network like that, the call will fail to connect (ICE negotiation
+  never completes) even though everything else — signaling, permissions,
+  UI — works fine. The fix is a TURN server: a relay that both browsers
+  connect to instead of each other, when a direct path isn't possible.
+  TURN uses real bandwidth (it's relaying your actual call traffic), so
+  unlike STUN it's not something you can just borrow for free indefinitely
+  — self-hosting your own is the practical option here.
+
+Self-hosting TURN with coturn:
+  coturn is the standard open-source STUN+TURN server. Add it as a service
+  to docker-compose.prod.yml alongside the existing backend/postgres/caddy
+  services:
+
+    turn:
+      image: coturn/coturn:latest
+      restart: unless-stopped
+      network_mode: host   # coturn needs real inbound UDP ports; host
+                            # networking is the simplest way to get that
+                            # on Linux (Docker's default bridge mode NATs
+                            # UDP awkwardly for TURN's relay port range)
+      command:
+        - -n
+        - --log-file=stdout
+        - --realm=turn.your-domain.example.com
+        - --fingerprint
+        - --use-auth-secret
+        - --static-auth-secret=${TURN_SHARED_SECRET}
+        - --min-port=49160
+        - --max-port=49200
+        - --listening-port=3478
+        - --tls-listening-port=5349
+
+  Notes on that config:
+    - `--use-auth-secret` + `--static-auth-secret` is coturn's "REST API"
+      style shared-secret auth (time-limited credentials derived from the
+      secret) rather than static username/password pairs — set
+      TURN_SHARED_SECRET to a long random string in your root .env, same
+      pattern as POSTGRES_PASSWORD.
+    - Open UDP/TCP 3478 (STUN/TURN) and 5349 (TURNS/TLS) on your firewall,
+      plus the UDP range you set for --min-port/--max-port (relayed media
+      traffic itself; a real deployment usually needs a decent-sized range,
+      shrink 49160-49200 if you want but don't go too narrow).
+    - Point your domain's DNS at this box the same way you did for the
+      main app (Section 2), e.g. turn.your-domain.example.com.
+    - Generating actual short-lived TURN credentials from the shared secret
+      (rather than embedding the raw secret in NEXT_PUBLIC_ICE_SERVERS,
+      which would be a public, unrotatable credential leak) is a small bit
+      of backend work not included in this pass — a `/turn-credentials`
+      endpoint that HMACs a timestamp+TURN_SHARED_SECRET per Twilio's/
+      coturn's documented REST API convention is the standard approach if
+      you get to the point of actually needing this. Until then, STUN-only
+      covers most real-world calls.
+
+  Once you have a TURN server running, point the frontend at it:
+
+    NEXT_PUBLIC_ICE_SERVERS=[{"urls":"stun:turn.your-domain.example.com:3478"},{"urls":"turn:turn.your-domain.example.com:3478","username":"...","credential":"..."},{"urls":"turns:turn.your-domain.example.com:5349","username":"...","credential":"..."}]
+
+  This is a single-line JSON array (RTCIceServer[]) — set it as one
+  environment variable value, same place as the other NEXT_PUBLIC_* vars
+  (Vercel project settings, or frontend/.env.local for local dev).
+
+Checklist:
+  [ ] Most calls between two typical home/office networks: STUN-only
+      (the default) just works, do nothing.
+  [ ] Calls failing to connect between specific networks (corporate VPN,
+      certain mobile carriers, CGNAT): stand up coturn per above, set
+      NEXT_PUBLIC_ICE_SERVERS to include it.
+  [ ] Never commit TURN_SHARED_SECRET or embed long-lived TURN credentials
+      in client-shipped env vars if you build the credential-minting
+      endpoint mentioned above — treat it like any other secret.
+
 
 SECTION 6 — FIRST-TIME SETUP CHECKLIST (for a friend with zero context)
 -------------------------------------------------------------------------
@@ -271,6 +375,12 @@ Tested for real on this machine:
 
 NOT tested (no Docker installed on this dev machine, and no real domain
 available to this session):
+  - The coturn config in Section 5b (never click-tested against a real
+    second network — you'd need two real machines on genuinely different
+    NATs to validate TURN relay failover for real).
+  - Actual live end-to-end calling (two real browsers, mic/camera
+    permission prompts, ICE negotiation) — reviewed/compiled but not
+    click-tested; see CLAUDE.md/commit message for details.
   - Actually building the backend's Docker image (docker build) or
     running `docker compose -f docker-compose.prod.yml up`.
   - Caddy's automatic HTTPS/Let's Encrypt flow (needs a real public

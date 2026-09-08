@@ -66,42 +66,132 @@ pub struct WsAuthQuery {
     token: String,
 }
 
-/// Messages the client can send *up* the socket. Currently just typing
-/// presence — everything else (sending a message, friending, etc.) goes
-/// through the regular HTTP API and gets fanned back out over the socket
-/// from there.
+/// Messages the client can send *up* the socket. Typing presence, plus
+/// WebRTC call signaling (ring/offer/answer/ICE/end/reject) for 1:1 voice
+/// and video calls — everything else (sending a message, friending, etc.)
+/// goes through the regular HTTP API and gets fanned back out over the
+/// socket from there.
+///
+/// `sdp` and `candidate` are passed through opaquely as `serde_json::Value`
+/// — this hub never needs to understand SDP/ICE internals, it just relays
+/// them verbatim to the other participant, same as it already does for
+/// typing.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientEvent {
     Typing { dm_id: Uuid },
+    /// Outbound call invite. `video` distinguishes a voice-only call from a
+    /// video call so the callee's UI/getUserMedia request can match.
+    CallRing { dm_id: Uuid, video: bool },
+    CallOffer { dm_id: Uuid, sdp: Value },
+    CallAnswer { dm_id: Uuid, sdp: Value },
+    CallIceCandidate { dm_id: Uuid, candidate: Value },
+    /// Hang up (from either side, at any point) or caller cancelling before
+    /// the callee answers.
+    CallEnd { dm_id: Uuid },
+    /// Callee explicitly declining an incoming ring, before ever answering.
+    CallReject { dm_id: Uuid },
 }
 
 /// Looks up the DM's participants, confirms `user_id` is actually one of
 /// them (silently drops the event otherwise — this is public-facing input
-/// off the socket), and fans the typing event out to everyone else in the
-/// DM. No persistence — typing state is deliberately ephemeral; the client
-/// expires its own "is typing" flag a few seconds after the last event.
+/// off the socket), and returns everyone else in the DM to relay to.
+/// Shared by typing and every call-signaling variant below.
+async fn other_participants(state: &AppState, dm_id: Uuid, user_id: Uuid) -> Option<Vec<Uuid>> {
+    let participants: Vec<(Uuid,)> =
+        match sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
+            .bind(dm_id)
+            .fetch_all(&state.db)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("ws: failed to look up dm participants: {e}");
+                return None;
+            }
+        };
+    let ids: Vec<Uuid> = participants.into_iter().map(|(id,)| id).collect();
+    if !ids.contains(&user_id) {
+        return None;
+    }
+    Some(ids.into_iter().filter(|id| *id != user_id).collect())
+}
+
+/// No persistence — typing state and call signaling are both deliberately
+/// ephemeral/live-only. Every call-signaling variant validates DM
+/// membership the same way (via `other_participants`) before relaying, and
+/// always includes the sender's `user_id` so the recipient knows who's
+/// calling/signaling — the hub itself has no notion of "call state", it's
+/// purely a relay; the actual call state machine lives client-side.
 async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent) {
     match event {
         ClientEvent::Typing { dm_id } => {
-            let participants: Vec<(Uuid,)> =
-                match sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
-                    .bind(dm_id)
-                    .fetch_all(&state.db)
-                    .await
-                {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        tracing::warn!("typing: failed to look up dm participants: {e}");
-                        return;
-                    }
-                };
-            let ids: Vec<Uuid> = participants.into_iter().map(|(id,)| id).collect();
-            if !ids.contains(&user_id) {
+            let Some(others) = other_participants(state, dm_id, user_id).await else {
                 return;
-            }
-            let others: Vec<Uuid> = ids.into_iter().filter(|id| *id != user_id).collect();
+            };
             let payload = json!({ "type": "typing", "dm_id": dm_id, "user_id": user_id });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::CallRing { dm_id, video } => {
+            let Some(others) = other_participants(state, dm_id, user_id).await else {
+                return;
+            };
+            let payload = json!({
+                "type": "call_ring",
+                "dm_id": dm_id,
+                "from": user_id,
+                "video": video,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::CallOffer { dm_id, sdp } => {
+            let Some(others) = other_participants(state, dm_id, user_id).await else {
+                return;
+            };
+            let payload = json!({
+                "type": "call_offer",
+                "dm_id": dm_id,
+                "from": user_id,
+                "sdp": sdp,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::CallAnswer { dm_id, sdp } => {
+            let Some(others) = other_participants(state, dm_id, user_id).await else {
+                return;
+            };
+            let payload = json!({
+                "type": "call_answer",
+                "dm_id": dm_id,
+                "from": user_id,
+                "sdp": sdp,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::CallIceCandidate { dm_id, candidate } => {
+            let Some(others) = other_participants(state, dm_id, user_id).await else {
+                return;
+            };
+            let payload = json!({
+                "type": "call_ice_candidate",
+                "dm_id": dm_id,
+                "from": user_id,
+                "candidate": candidate,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::CallEnd { dm_id } => {
+            let Some(others) = other_participants(state, dm_id, user_id).await else {
+                return;
+            };
+            let payload = json!({ "type": "call_end", "dm_id": dm_id, "from": user_id });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::CallReject { dm_id } => {
+            let Some(others) = other_participants(state, dm_id, user_id).await else {
+                return;
+            };
+            let payload = json!({ "type": "call_reject", "dm_id": dm_id, "from": user_id });
             state.ws_hub.send_to_many(&others, payload).await;
         }
     }

@@ -18,6 +18,8 @@ import {
   X,
   Radio,
   ChevronLeft,
+  Phone,
+  Video,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,7 +42,10 @@ import {
 } from "@/lib/backend-api";
 import { useRealtime } from "@/lib/realtime-context";
 import { useSoundSettings } from "@/lib/use-sound-settings";
+import { useCall } from "@/lib/call-context";
 import { SoundSettingsDialog } from "@/components/sound-settings-dialog";
+import { IncomingCallToast } from "@/components/incoming-call-toast";
+import { CallPanel } from "@/components/call-panel";
 
 type View = { kind: "friends" } | { kind: "dm"; dmId: string };
 
@@ -143,6 +148,7 @@ export function ChatApp({
   const { getToken } = useAuth();
   const { subscribe, connected, sendTyping } = useRealtime();
   const sound = useSoundSettings();
+  const { call, startCall } = useCall();
 
   const [myId, setMyId] = useState<string | null>(null);
   const [friends, setFriends] = useState<Friendship[]>([]);
@@ -443,6 +449,20 @@ export function ChatApp({
   const activeGroups = groupMessages(activeMessages);
   const activeLabel = activeDm?.other_username ?? activeDm?.other_email ?? "?";
   const activeTyping = view.kind === "dm" && !!typingIn[view.dmId];
+
+  // Resolves a display label for whoever's on the other end of a call from
+  // just their user id — checks the DM list first (covers the common case
+  // of calling from within an open conversation), then falls back to the
+  // friends list (covers an incoming ring for a DM that isn't loaded into
+  // `dms` yet, e.g. right after app load).
+  function resolvePeerLabel(peerUserId: string | null): string {
+    if (!peerUserId) return "Unknown";
+    const fromDm = dms.find((d) => d.other_user_id === peerUserId);
+    if (fromDm) return fromDm.other_username ?? fromDm.other_email ?? "Unknown";
+    const fromFriend = friends.find((f) => f.user_id === peerUserId);
+    if (fromFriend) return fromFriend.username ?? fromFriend.email;
+    return "Unknown";
+  }
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-[#0B0D12]">
@@ -781,7 +801,7 @@ export function ChatApp({
                 seed={activeDm?.other_user_id ?? activeLabel}
                 label={activeLabel}
               />
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-semibold text-[#E8EAED]">
                   {activeLabel}
                 </p>
@@ -792,6 +812,32 @@ export function ChatApp({
                     activeDm?.other_email
                   )}
                 </p>
+              </div>
+              <div className="flex flex-none items-center gap-1">
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  disabled={!connected || call.status !== "idle" || !activeDm?.other_user_id}
+                  onClick={() =>
+                    activeDm?.other_user_id &&
+                    void startCall(view.dmId, activeDm.other_user_id, "voice")
+                  }
+                  title="Start voice call"
+                >
+                  <Phone className="size-4" />
+                </Button>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  disabled={!connected || call.status !== "idle" || !activeDm?.other_user_id}
+                  onClick={() =>
+                    activeDm?.other_user_id &&
+                    void startCall(view.dmId, activeDm.other_user_id, "video")
+                  }
+                  title="Start video call"
+                >
+                  <Video className="size-4" />
+                </Button>
               </div>
             </div>
 
@@ -910,6 +956,13 @@ export function ChatApp({
         onClose={() => setSoundsOpen(false)}
         sound={sound}
       />
+
+      {/* Rendered at the top level (not scoped to the DM view) so an
+          incoming call surfaces no matter what's currently open — friends
+          list, a different DM, whatever. peerLabel is resolved here since
+          call-context.tsx only knows the peer's raw user id. */}
+      <IncomingCallToast peerLabel={resolvePeerLabel(call.peerUserId)} />
+      <CallPanel peerLabel={resolvePeerLabel(call.peerUserId)} />
     </div>
   );
 }

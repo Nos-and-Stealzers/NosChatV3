@@ -1,6 +1,7 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { RealtimeProvider } from "@/lib/realtime-context";
+import { CallProvider } from "@/lib/call-context";
 import { ChatApp } from "@/components/chat-app";
 
 // Real app: friends, DMs, and realtime messaging, wired end-to-end against
@@ -20,7 +21,9 @@ export default async function Home() {
 
   return (
     <RealtimeProvider>
-      <ChatApp displayName={displayName} email={email} />
+      <CallProvider>
+        <ChatApp displayName={displayName} email={email} />
+      </CallProvider>
     </RealtimeProvider>
   );
 }

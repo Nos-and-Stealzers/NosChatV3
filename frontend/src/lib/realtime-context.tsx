@@ -15,7 +15,34 @@ export type RealtimeEvent =
   | { type: "message"; message: import("@/lib/backend-api").Message }
   | { type: "friend_request"; friendship_id: string; from: string }
   | { type: "friend_accepted"; friendship_id: string; from: string }
-  | { type: "typing"; dm_id: string; user_id: string };
+  | { type: "typing"; dm_id: string; user_id: string }
+  // --- WebRTC call signaling (server->client, fanned out from ws.rs) -----
+  // Each carries `dm_id` + `from` (the sender's user id) so the recipient
+  // knows which DM and who's calling/signaling, plus whatever payload that
+  // signal type needs. The hub itself never inspects sdp/candidate — it's
+  // an opaque relay, same pattern as `typing`.
+  | { type: "call_ring"; dm_id: string; from: string; video: boolean }
+  | { type: "call_offer"; dm_id: string; from: string; sdp: RTCSessionDescriptionInit }
+  | { type: "call_answer"; dm_id: string; from: string; sdp: RTCSessionDescriptionInit }
+  | {
+      type: "call_ice_candidate";
+      dm_id: string;
+      from: string;
+      candidate: RTCIceCandidateInit;
+    }
+  | { type: "call_end"; dm_id: string; from: string }
+  | { type: "call_reject"; dm_id: string; from: string };
+
+// Client->server call-signaling shapes sendCallSignal accepts — mirrors the
+// backend's ClientEvent enum in ws.rs (minus Typing, which keeps its own
+// dedicated sendTyping helper below).
+export type CallSignal =
+  | { type: "call_ring"; dm_id: string; video: boolean }
+  | { type: "call_offer"; dm_id: string; sdp: RTCSessionDescriptionInit }
+  | { type: "call_answer"; dm_id: string; sdp: RTCSessionDescriptionInit }
+  | { type: "call_ice_candidate"; dm_id: string; candidate: RTCIceCandidateInit }
+  | { type: "call_end"; dm_id: string }
+  | { type: "call_reject"; dm_id: string };
 
 type Listener = (event: RealtimeEvent) => void;
 
@@ -29,6 +56,11 @@ type RealtimeContextValue = {
   // silently if the socket isn't open — typing presence is best-effort by
   // nature, not worth queuing or retrying.
   sendTyping: (dmId: string) => void;
+  // Fire-and-forget: sends any call-signaling event (ring/offer/answer/ICE/
+  // end/reject) up the same socket. No-ops silently if the socket isn't
+  // open — call-context.tsx is responsible for treating that as a hard
+  // failure (there's no retry queue here, same as sendTyping).
+  sendCallSignal: (signal: CallSignal) => void;
 };
 
 const RealtimeContext = createContext<RealtimeContextValue | null>(null);
@@ -65,6 +97,13 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "typing", dm_id: dmId }));
+    }
+  }, []);
+
+  const sendCallSignal = useCallback((signal: CallSignal) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(signal));
     }
   }, []);
 
@@ -112,7 +151,7 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <RealtimeContext.Provider value={{ subscribe, connected, sendTyping }}>
+    <RealtimeContext.Provider value={{ subscribe, connected, sendTyping, sendCallSignal }}>
       {children}
     </RealtimeContext.Provider>
   );
