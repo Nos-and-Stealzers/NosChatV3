@@ -146,6 +146,52 @@ async fn assert_member(state: &AppState, guild_id: Uuid, user_id: Uuid) -> Resul
     Ok(())
 }
 
+/// Force-disconnects `user_id` from any voice channel *belonging to this
+/// guild* they're currently in, and notifies the remaining participants —
+/// used when a member is kicked or leaves, so they don't keep transmitting
+/// audio into a channel they're no longer allowed in and other members
+/// don't see a ghost peer stuck in the roster. Only touches this guild's
+/// channels (a user could theoretically be in a voice channel of a
+/// *different* guild at the same time, which must be left untouched).
+async fn force_disconnect_guild_voice(state: &AppState, guild_id: Uuid, user_id: Uuid) {
+    let guild_channel_ids: Vec<(Uuid,)> = match sqlx::query_as(
+        "SELECT id FROM guild_channels WHERE guild_id = $1 AND kind = 'voice'",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("force_disconnect_guild_voice: failed to list voice channels: {e}");
+            return;
+        }
+    };
+
+    for (channel_id,) in guild_channel_ids {
+        if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {
+            continue;
+        }
+        state.ws_hub.voice_leave(channel_id, user_id).await;
+        let remaining = state.ws_hub.voice_members(channel_id).await;
+        let left_payload = json!({
+            "type": "voice_user_left",
+            "channel_id": channel_id,
+            "user_id": user_id,
+        });
+        state.ws_hub.send_to_many(&remaining, left_payload).await;
+        // Tell the removed user's own client(s) too, so an open voice UI
+        // tab tears itself down immediately instead of looking connected
+        // while actually cut off server-side.
+        let forced_payload = json!({
+            "type": "voice_user_left",
+            "channel_id": channel_id,
+            "user_id": user_id,
+        });
+        state.ws_hub.send_to(user_id, forced_payload).await;
+    }
+}
+
 // ---------------------------------------------------------------------
 // View structs
 // ---------------------------------------------------------------------
@@ -487,6 +533,8 @@ pub async fn leave_guild(
         .await
         .map_err(internal_err)?;
 
+    force_disconnect_guild_voice(&state, guild_id, me).await;
+
     Ok(Json(json!({ "status": "left" })))
 }
 
@@ -573,6 +621,8 @@ pub async fn kick_member(
         .execute(&state.db)
         .await
         .map_err(internal_err)?;
+
+    force_disconnect_guild_voice(&state, guild_id, user_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
