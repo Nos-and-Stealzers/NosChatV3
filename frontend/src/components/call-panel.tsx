@@ -6,12 +6,14 @@
 // (rail + sidebar + main). Voice-only calls skip the video tiles and show
 // avatars instead.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Camera,
   CameraOff,
+  Maximize2,
   Mic,
   MicOff,
+  Minimize2,
   Phone,
   PhoneOff,
   ScreenShare,
@@ -20,10 +22,12 @@ import {
 import { useCall } from "@/lib/call-context";
 import { useSettings } from "@/lib/settings-context";
 
-function CallAvatar({ label }: { label: string }) {
+function CallAvatar({ label, large }: { label: string; large?: boolean }) {
   const initial = (label || "?").trim().charAt(0).toUpperCase() || "?";
   return (
-    <span className="flex h-24 w-24 flex-none items-center justify-center rounded-full bg-gradient-to-br from-[#F3B57E] to-[#EB9A50] font-display text-4xl italic text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.3)_inset]">
+    <span
+      className={`flex flex-none items-center justify-center rounded-full bg-gradient-to-br from-[#F3B57E] to-[#EB9A50] font-display italic text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.3)_inset] ${large ? "h-40 w-40 text-6xl" : "h-24 w-24 text-4xl"}`}
+    >
       {initial}
     </span>
   );
@@ -34,6 +38,7 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
   const { settings } = useSettings();
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const [expanded, setExpanded] = useState(false);
 
   function handleScreenShareClick() {
     if (
@@ -65,8 +70,25 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
         : "In call";
 
   return (
-    <div className="animate-rise-in fixed bottom-4 right-4 z-40 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-[#2A2F3A] bg-[#0B0D12] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.7)]">
-      <div className="noschat-grain relative flex aspect-video w-full items-center justify-center bg-[#12151B]">
+    <div
+      className={`animate-rise-in fixed z-40 overflow-hidden rounded-2xl border border-[#2A2F3A] bg-[#0B0D12] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.7)] transition-[width,height] duration-200 ${
+        expanded
+          ? "bottom-4 right-4 top-4 w-[min(64rem,calc(100vw-2rem))]"
+          : "bottom-4 right-4 w-[min(22rem,calc(100vw-2rem))]"
+      }`}
+    >
+      <div
+        className={`noschat-grain relative flex w-full items-center justify-center bg-[#12151B] ${
+          expanded ? "h-[calc(100%-4.25rem)]" : "aspect-video"
+        }`}
+      >
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          title={expanded ? "Shrink call" : "Expand call"}
+          className="absolute right-2 top-2 z-10 flex size-8 items-center justify-center rounded-full bg-black/40 text-white/80 backdrop-blur transition-colors hover:bg-black/60 hover:text-white"
+        >
+          {expanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+        </button>
         {isVideo ? (
           <>
             {/* Remote video fills the tile; falls back to an avatar until a
@@ -79,7 +101,7 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
                 className="h-full w-full object-cover"
               />
             ) : (
-              <CallAvatar label={peerLabel} />
+              <CallAvatar label={peerLabel} large={expanded} />
             )}
             {/* Local self-view, picture-in-picture style, only when camera
                 is actually on (screen share replaces this track too, so it
@@ -90,7 +112,7 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
                 autoPlay
                 playsInline
                 muted
-                className="absolute bottom-2 right-2 h-16 w-24 rounded-lg border border-[#2A2F3A] object-cover shadow-lg"
+                className={`absolute bottom-2 right-2 rounded-lg border border-[#2A2F3A] object-cover shadow-lg ${expanded ? "h-32 w-48" : "h-16 w-24"}`}
               />
             )}
           </>
