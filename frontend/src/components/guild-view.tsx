@@ -144,7 +144,7 @@ export function GuildView({
 }) {
   const { getToken } = useAuth();
   const { subscribe } = useRealtime();
-  const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic } = useVoice();
+  const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera } = useVoice();
   const { statusOf, fetchProfile } = usePresence();
 
   const [detail, setDetail] = useState<GuildDetail | null>(null);
@@ -1087,37 +1087,68 @@ export function GuildView({
                 <>
                   <div className="grid w-full max-w-2xl grid-cols-2 gap-4 sm:grid-cols-3">
                     <div className="flex flex-col items-center gap-2 rounded-xl border border-[#2A2F3A] bg-[#12151B] p-4">
-                      <Avatar seed={myId ?? "me"} label="You" size="lg" />
+                      {voice.cameraOn && voice.localStream ? (
+                        // eslint-disable-next-line jsx-a11y/media-has-caption -- local self-view, no captions applicable
+                        <video
+                          autoPlay
+                          playsInline
+                          muted
+                          className="h-16 w-full rounded-lg object-cover"
+                          ref={(el) => {
+                            if (el && el.srcObject !== voice.localStream) el.srcObject = voice.localStream;
+                          }}
+                        />
+                      ) : (
+                        <Avatar seed={myId ?? "me"} label="You" size="lg" />
+                      )}
                       <span className="text-sm text-[#E8EAED]">
                         You {voice.micMuted && "(muted)"}
                       </span>
                     </div>
-                    {Object.entries(voice.peers).map(([userId, peer]) => (
-                      <div
-                        key={userId}
-                        className="flex flex-col items-center gap-2 rounded-xl border border-[#2A2F3A] bg-[#12151B] p-4"
-                      >
-                        <Avatar seed={userId} label={nameFor(userId)} size="lg" />
-                        <span className="truncate text-sm text-[#E8EAED]">{nameFor(userId)}</span>
-                        <span className="font-mono text-[9px] uppercase tracking-wide text-[#8B93A1]">
-                          {peer.connectionState}
-                        </span>
-                        {peer.stream && (
-                          // eslint-disable-next-line jsx-a11y/media-has-caption -- remote voice audio, no captions applicable
-                          <audio
-                            autoPlay
-                            ref={(el) => {
-                              if (el && el.srcObject !== peer.stream) el.srcObject = peer.stream;
-                            }}
-                          />
-                        )}
-                      </div>
-                    ))}
+                    {Object.entries(voice.peers).map(([userId, peer]) => {
+                      const hasVideo = !!peer.stream?.getVideoTracks().length;
+                      return (
+                        <div
+                          key={userId}
+                          className="flex flex-col items-center gap-2 rounded-xl border border-[#2A2F3A] bg-[#12151B] p-4"
+                        >
+                          {hasVideo && peer.stream ? (
+                            // eslint-disable-next-line jsx-a11y/media-has-caption -- remote voice video, no captions applicable
+                            <video
+                              autoPlay
+                              playsInline
+                              className="h-16 w-full rounded-lg object-cover"
+                              ref={(el) => {
+                                if (el && el.srcObject !== peer.stream) el.srcObject = peer.stream;
+                              }}
+                            />
+                          ) : (
+                            <Avatar seed={userId} label={nameFor(userId)} size="lg" />
+                          )}
+                          <span className="truncate text-sm text-[#E8EAED]">{nameFor(userId)}</span>
+                          <span className="font-mono text-[9px] uppercase tracking-wide text-[#8B93A1]">
+                            {peer.connectionState}
+                          </span>
+                          {peer.stream && (
+                            // eslint-disable-next-line jsx-a11y/media-has-caption -- remote voice audio, no captions applicable
+                            <audio
+                              autoPlay
+                              ref={(el) => {
+                                if (el && el.srcObject !== peer.stream) el.srcObject = peer.stream;
+                              }}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                   <div className="flex items-center gap-3">
                     <Button variant="secondary" onClick={toggleMic}>
                       {voice.micMuted ? <MicOff className="size-4" /> : <Mic className="size-4" />}
                       {voice.micMuted ? "Unmute" : "Mute"}
+                    </Button>
+                    <Button variant="secondary" onClick={() => void toggleCamera()}>
+                      {voice.cameraOn ? "Turn Camera Off" : "Turn Camera On"}
                     </Button>
                     <Button variant="destructive" onClick={leaveVoiceChannel}>
                       <LogOut className="size-4" /> Disconnect

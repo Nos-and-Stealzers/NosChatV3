@@ -45,6 +45,7 @@ export type VoiceState = {
   guildId: string | null;
   peers: Record<string /* user_id */, VoicePeerState>;
   micMuted: boolean;
+  cameraOn: boolean;
   localStream: MediaStream | null;
 };
 
@@ -53,6 +54,7 @@ const IDLE_STATE: VoiceState = {
   guildId: null,
   peers: {},
   micMuted: false,
+  cameraOn: false,
   localStream: null,
 };
 
@@ -74,6 +76,7 @@ type VoiceContextValue = {
   joinVoiceChannel: (guildId: string, channelId: string) => Promise<void>;
   leaveVoiceChannel: () => void;
   toggleMic: () => void;
+  toggleCamera: () => Promise<void>;
 };
 
 const VoiceContext = createContext<VoiceContextValue | null>(null);
@@ -99,6 +102,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Record<string, PeerSession>>({});
   const micMutedRef = useRef(false);
+  const cameraOnRef = useRef(false);
 
   const buildAudioConstraints = useCallback((): MediaTrackConstraints | boolean => {
     const s = settingsRef.current;
@@ -138,6 +142,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     channelIdRef.current = null;
     guildIdRef.current = null;
     micMutedRef.current = false;
+    cameraOnRef.current = false;
     setVoice(IDLE_STATE);
   }, [teardownPeer]);
 
@@ -268,6 +273,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           guildId,
           peers: {},
           micMuted: micMutedRef.current,
+          cameraOn: false,
           localStream: stream,
         });
         sendGuildSignal({ type: "voice_join", channel_id: channelId });
@@ -294,6 +300,83 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     micMutedRef.current = nextMuted;
     setVoice((prev) => ({ ...prev, micMuted: nextMuted }));
   }, []);
+
+  // Renegotiates every existing peer connection after the local track set
+  // changes (camera on/off) — required because WebRTC only auto-includes
+  // tracks present at initial offer time; adding/removing a track later
+  // needs a fresh offer/answer round per peer. The existing `voice_offer`
+  // handler in the subscribe effect below already treats an offer for an
+  // *existing* session as a renegotiation (it just does setRemoteDescription
+  // + createAnswer regardless of whether the session is brand new), so no
+  // separate "renegotiation offer" event type is needed — this reuses the
+  // exact same signaling path as the initial join.
+  const renegotiateAllPeers = useCallback(
+    async (channelId: string) => {
+      for (const [remoteUserId, session] of Object.entries(peersRef.current)) {
+        try {
+          const offer = await session.pc.createOffer();
+          await session.pc.setLocalDescription(offer);
+          sendGuildSignal({
+            type: "voice_offer",
+            channel_id: channelId,
+            to: remoteUserId,
+            sdp: offer as RTCSessionDescriptionInit,
+          });
+        } catch (e) {
+          console.warn(`voice: failed to renegotiate with ${remoteUserId}`, e);
+        }
+      }
+    },
+    [sendGuildSignal],
+  );
+
+  // Turns the local camera on/off mid-call, matching call-context.tsx's
+  // 1:1 pattern but generalized to renegotiate with every mesh peer
+  // instead of just one. Camera is off by default in voice channels
+  // (audio-only, matching Discord's default) — this is purely opt-in.
+  const toggleCamera = useCallback(async () => {
+    const channelId = channelIdRef.current;
+    if (!channelId) return;
+
+    if (cameraOnRef.current) {
+      // Turning off: stop the track, remove it from the local stream and
+      // from every peer's sender, then renegotiate so peers stop expecting
+      // a video track (avoids a black/frozen tile on their end).
+      const stream = localStreamRef.current;
+      const videoTrack = stream?.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.stop();
+        stream?.removeTrack(videoTrack);
+      }
+      for (const session of Object.values(peersRef.current)) {
+        const sender = session.pc.getSenders().find((s) => s.track?.kind === "video");
+        if (sender) session.pc.removeTrack(sender);
+      }
+      cameraOnRef.current = false;
+      setVoice((prev) => ({ ...prev, cameraOn: false, localStream: localStreamRef.current }));
+      await renegotiateAllPeers(channelId);
+      return;
+    }
+
+    try {
+      const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const [videoTrack] = videoStream.getVideoTracks();
+      const stream = localStreamRef.current;
+      if (stream) {
+        stream.addTrack(videoTrack);
+      } else {
+        localStreamRef.current = videoStream;
+      }
+      for (const session of Object.values(peersRef.current)) {
+        session.pc.addTrack(videoTrack, localStreamRef.current!);
+      }
+      cameraOnRef.current = true;
+      setVoice((prev) => ({ ...prev, cameraOn: true, localStream: localStreamRef.current }));
+      await renegotiateAllPeers(channelId);
+    } catch (e) {
+      console.warn("voice: failed to access camera", e);
+    }
+  }, [renegotiateAllPeers]);
 
   useEffect(() => {
     return subscribe(async (event: RealtimeEvent) => {
@@ -385,7 +468,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <VoiceContext.Provider
-      value={{ voice, joinVoiceChannel, leaveVoiceChannel, toggleMic }}
+      value={{ voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera }}
     >
       {children}
     </VoiceContext.Provider>
