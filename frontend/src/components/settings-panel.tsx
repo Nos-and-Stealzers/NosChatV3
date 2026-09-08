@@ -404,7 +404,11 @@ function GenericControl({
         className="h-8 w-full rounded-lg border border-[#2A2F3A] bg-[#0F1217]/80 px-2 text-xs text-[#E8EAED] outline-none focus:border-[#F0A868]/40 sm:w-44"
       >
         {def.options?.map((opt) => (
-          <option key={opt.value} value={opt.value}>
+          <option
+            key={opt.value}
+            value={opt.value}
+            className="bg-[#12151B] text-[#E8EAED]"
+          >
             {opt.label}
           </option>
         ))}
@@ -836,9 +840,15 @@ function DevicePicker({
       onChange={(e) => update(key, e.target.value as SettingsState[typeof key])}
       className="h-8 w-full max-w-56 rounded-lg border border-[#2A2F3A] bg-[#0F1217]/80 px-2 text-xs text-[#E8EAED] outline-none focus:border-[#F0A868]/40"
     >
-      <option value="">System default</option>
+      <option value="" className="bg-[#12151B] text-[#E8EAED]">
+        System default
+      </option>
       {devices.map((d) => (
-        <option key={d.deviceId} value={d.deviceId}>
+        <option
+          key={d.deviceId}
+          value={d.deviceId}
+          className="bg-[#12151B] text-[#E8EAED]"
+        >
           {d.label || `${kind === "audioinput" ? "Microphone" : "Camera"} ${d.deviceId.slice(0, 6)}`}
         </option>
       ))}

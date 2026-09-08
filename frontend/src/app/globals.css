@@ -127,6 +127,15 @@
   }
   html {
     @apply font-sans;
+    /* Tells the browser this app is dark-themed so native, unstyled form
+       chrome (select dropdown option lists, date/time pickers, etc.) uses
+       dark OS rendering instead of defaulting to black-on-white — those
+       controls live outside Tailwind's reach since they're rendered by the
+       OS/browser, not this app's DOM. Without this, e.g. a <select>'s
+       closed box could look themed while its open <option> list rendered
+       with black text on a white background regardless of any text-*
+       classes applied to the <option> elements themselves. */
+    color-scheme: dark;
   }
 }
 
