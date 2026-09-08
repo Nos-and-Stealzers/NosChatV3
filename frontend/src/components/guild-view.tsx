@@ -26,9 +26,14 @@ import {
   MicOff,
   PhoneOff,
   LogOut,
+  Plus,
+  FolderPlus,
+  Trash2,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { avatarRamp, initialOf } from "@/lib/utils";
 import {
   getGuild,
@@ -37,10 +42,16 @@ import {
   listGuildMembers,
   hasPermission,
   PERMISSIONS,
+  createGuildChannel,
+  createGuildCategory,
+  deleteGuildChannel,
+  leaveGuild,
+  deleteGuild,
   type GuildDetail,
   type GuildChannel,
   type GuildMessage,
   type ChannelCategory,
+  type ChannelKind,
   type GuildMember,
 } from "@/lib/backend-api";
 import { useRealtime } from "@/lib/realtime-context";
@@ -105,11 +116,13 @@ export function GuildView({
   myId,
   onOpenSettings,
   onOpenInvite,
+  onLeftGuild,
 }: {
   guildId: string;
   myId: string | null;
   onOpenSettings: () => void;
   onOpenInvite: () => void;
+  onLeftGuild?: () => void;
 }) {
   const { getToken } = useAuth();
   const { subscribe } = useRealtime();
@@ -134,6 +147,28 @@ export function GuildView({
   const headerMenuRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+
+  // Create-channel / create-category modal state. `addChannelCategoryId` is
+  // undefined when the modal is closed, null for "no category" (top-level),
+  // or a category id when launched from a specific category's "+" button.
+  const [addChannelCategoryId, setAddChannelCategoryId] = useState<string | null | undefined>(
+    undefined,
+  );
+  const [newChannelName, setNewChannelName] = useState("");
+  const [newChannelKind, setNewChannelKind] = useState<ChannelKind>("text");
+  const [creatingChannel, setCreatingChannel] = useState(false);
+  const [channelActionError, setChannelActionError] = useState<string | null>(null);
+
+  const [addCategoryOpen, setAddCategoryOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [creatingCategory, setCreatingCategory] = useState(false);
+
+  const [pendingDeleteChannel, setPendingDeleteChannel] = useState<GuildChannel | null>(null);
+  const [deletingChannel, setDeletingChannel] = useState(false);
+
+  const [leaveOrDeleteOpen, setLeaveOrDeleteOpen] = useState(false);
+  const [leavingOrDeleting, setLeavingOrDeleting] = useState(false);
+  const [leaveOrDeleteError, setLeaveOrDeleteError] = useState<string | null>(null);
 
   const refreshDetail = useCallback(async () => {
     const token = await getToken();
@@ -256,6 +291,96 @@ export function GuildView({
     setActiveChannelId(channel.id);
   }
 
+  function openAddChannel(categoryId: string | null) {
+    setAddChannelCategoryId(categoryId);
+    setNewChannelName("");
+    setNewChannelKind("text");
+    setChannelActionError(null);
+  }
+
+  async function handleCreateChannel(e: FormEvent) {
+    e.preventDefault();
+    if (addChannelCategoryId === undefined || !newChannelName.trim()) return;
+    setCreatingChannel(true);
+    setChannelActionError(null);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const body: { name: string; kind: ChannelKind; category_id?: string } = {
+        name: newChannelName.trim(),
+        kind: newChannelKind,
+      };
+      if (addChannelCategoryId) body.category_id = addChannelCategoryId;
+      await createGuildChannel(token, guildId, body);
+      setAddChannelCategoryId(undefined);
+      await refreshDetail();
+    } catch (err) {
+      setChannelActionError(err instanceof Error ? err.message : "Failed to create channel");
+    } finally {
+      setCreatingChannel(false);
+    }
+  }
+
+  async function handleCreateCategory(e: FormEvent) {
+    e.preventDefault();
+    if (!newCategoryName.trim()) return;
+    setCreatingCategory(true);
+    setChannelActionError(null);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await createGuildCategory(token, guildId, newCategoryName.trim());
+      setAddCategoryOpen(false);
+      setNewCategoryName("");
+      await refreshDetail();
+    } catch (err) {
+      setChannelActionError(err instanceof Error ? err.message : "Failed to create category");
+    } finally {
+      setCreatingCategory(false);
+    }
+  }
+
+  async function handleDeleteChannel() {
+    if (!pendingDeleteChannel) return;
+    setDeletingChannel(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await deleteGuildChannel(token, guildId, pendingDeleteChannel.id);
+      if (activeChannelId === pendingDeleteChannel.id) setActiveChannelId(null);
+      setPendingDeleteChannel(null);
+      await refreshDetail();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to delete channel");
+    } finally {
+      setDeletingChannel(false);
+    }
+  }
+
+  const isOwner = detail?.owner_id === myId;
+
+  async function handleLeaveOrDeleteGuild() {
+    setLeavingOrDeleting(true);
+    setLeaveOrDeleteError(null);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      if (isOwner) {
+        await deleteGuild(token, guildId);
+      } else {
+        await leaveGuild(token, guildId);
+      }
+      setLeaveOrDeleteOpen(false);
+      onLeftGuild?.();
+    } catch (err) {
+      setLeaveOrDeleteError(
+        err instanceof Error ? err.message : `Failed to ${isOwner ? "delete" : "leave"} server`,
+      );
+    } finally {
+      setLeavingOrDeleting(false);
+    }
+  }
+
   async function handleSend(e: FormEvent) {
     e.preventDefault();
     if (!activeChannel || activeChannel.kind !== "text" || !composer.trim()) return;
@@ -355,11 +480,42 @@ export function GuildView({
                   <Settings className="size-4 text-[#8B93A1]" /> Server Settings
                 </button>
               )}
+              <button
+                onClick={() => {
+                  setHeaderMenuOpen(false);
+                  setLeaveOrDeleteError(null);
+                  setLeaveOrDeleteOpen(true);
+                }}
+                className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[#EB5757] transition-colors hover:bg-[#EB5757]/10"
+              >
+                <LogOut className="size-4" /> {isOwner ? "Delete Server" : "Leave Server"}
+              </button>
             </div>
           )}
         </div>
 
         <div className="noschat-scroll flex-1 overflow-y-auto px-2 py-3">
+          {canManageGuild && (
+            <div className="mb-2 flex items-center gap-1 px-1">
+              <button
+                onClick={() => openAddChannel(null)}
+                className="flex flex-1 items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+              >
+                <Plus className="size-3.5" /> Channel
+              </button>
+              <button
+                onClick={() => {
+                  setAddCategoryOpen(true);
+                  setNewCategoryName("");
+                  setChannelActionError(null);
+                }}
+                title="New category"
+                className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+              >
+                <FolderPlus className="size-3.5" />
+              </button>
+            </div>
+          )}
           {groups.map((group) => {
             const catId = group.category?.id ?? "__uncategorized";
             const collapsed = collapsedCategories[catId];
@@ -373,7 +529,21 @@ export function GuildView({
                     className="flex w-full items-center gap-1 px-1.5 py-1 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1] hover:text-[#E8EAED]"
                   >
                     {collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
-                    {group.category.name}
+                    <span className="flex-1 text-left">{group.category.name}</span>
+                    {canManageGuild && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openAddChannel(group.category!.id);
+                        }}
+                        title="New channel in category"
+                        className="rounded p-0.5 text-[#8B93A1] hover:text-[#F0A868]"
+                      >
+                        <Plus className="size-3" />
+                      </span>
+                    )}
                   </button>
                 )}
                 {!collapsed && (
@@ -382,19 +552,35 @@ export function GuildView({
                       const isActive = activeChannelId === ch.id;
                       const presentUsers = voicePresence[ch.id] ?? [];
                       return (
-                        <div key={ch.id}>
-                          <button
-                            onClick={() => selectChannel(ch)}
+                        <div key={ch.id} className="group/channel">
+                          <div
                             data-active={isActive}
-                            className="group flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-sm text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED] data-[active=true]:bg-[#1E232C] data-[active=true]:text-[#E8EAED]"
+                            className="group flex w-full items-center gap-1.5 rounded-lg pr-1 pl-2 text-left text-sm text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED] data-[active=true]:bg-[#1E232C] data-[active=true]:text-[#E8EAED]"
                           >
-                            {ch.kind === "text" ? (
-                              <Hash className="size-4 flex-none text-[#8B93A1]/70" />
-                            ) : (
-                              <Volume2 className="size-4 flex-none text-[#8B93A1]/70" />
+                            <button
+                              onClick={() => selectChannel(ch)}
+                              className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5"
+                            >
+                              {ch.kind === "text" ? (
+                                <Hash className="size-4 flex-none text-[#8B93A1]/70" />
+                              ) : (
+                                <Volume2 className="size-4 flex-none text-[#8B93A1]/70" />
+                              )}
+                              <span className="truncate">{ch.name}</span>
+                            </button>
+                            {canManageGuild && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPendingDeleteChannel(ch);
+                                }}
+                                title="Delete channel"
+                                className="flex-none rounded p-1 opacity-0 transition-opacity group-hover/channel:opacity-100 hover:text-[#EB5757]"
+                              >
+                                <Trash2 className="size-3.5" />
+                              </button>
                             )}
-                            <span className="truncate">{ch.name}</span>
-                          </button>
+                          </div>
                           {ch.kind === "voice" && presentUsers.length > 0 && (
                             <div className="ml-6 flex flex-col gap-1 py-1">
                               {presentUsers.map((uid) => (
@@ -633,6 +819,155 @@ export function GuildView({
           </>
         )}
       </div>
+
+      {addChannelCategoryId !== undefined && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+          onClick={() => setAddChannelCategoryId(undefined)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="noschat-grain animate-rise-in relative w-full max-w-sm overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.75)]"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="font-display text-xl italic text-[#E8EAED]">New Channel</h3>
+              <button
+                onClick={() => setAddChannelCategoryId(undefined)}
+                className="flex size-7 items-center justify-center rounded-lg text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateChannel} className="space-y-3">
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNewChannelKind("text")}
+                  data-active={newChannelKind === "text"}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#2A2F3A] py-2 text-sm text-[#8B93A1] data-[active=true]:border-[#F0A868]/50 data-[active=true]:text-[#F0A868]"
+                >
+                  <Hash className="size-4" /> Text
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewChannelKind("voice")}
+                  data-active={newChannelKind === "voice"}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#2A2F3A] py-2 text-sm text-[#8B93A1] data-[active=true]:border-[#F0A868]/50 data-[active=true]:text-[#F0A868]"
+                >
+                  <Volume2 className="size-4" /> Voice
+                </button>
+              </div>
+              <Input
+                autoFocus
+                value={newChannelName}
+                onChange={(e) => setNewChannelName(e.target.value)}
+                placeholder="new-channel"
+                className="h-10 rounded-lg border-[#2A2F3A] bg-[#0F1217]/80 text-[#E8EAED] placeholder:text-[#8B93A1]/60"
+              />
+              {channelActionError && <p className="text-xs text-[#EB5757]">{channelActionError}</p>}
+              <Button type="submit" disabled={creatingChannel || !newChannelName.trim()} className="w-full">
+                {creatingChannel ? "Creating…" : "Create Channel"}
+              </Button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {addCategoryOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+          onClick={() => setAddCategoryOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="noschat-grain animate-rise-in relative w-full max-w-sm overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.75)]"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="font-display text-xl italic text-[#E8EAED]">New Category</h3>
+              <button
+                onClick={() => setAddCategoryOpen(false)}
+                className="flex size-7 items-center justify-center rounded-lg text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateCategory} className="space-y-3">
+              <Input
+                autoFocus
+                value={newCategoryName}
+                onChange={(e) => setNewCategoryName(e.target.value)}
+                placeholder="NEW CATEGORY"
+                className="h-10 rounded-lg border-[#2A2F3A] bg-[#0F1217]/80 text-[#E8EAED] placeholder:text-[#8B93A1]/60"
+              />
+              {channelActionError && <p className="text-xs text-[#EB5757]">{channelActionError}</p>}
+              <Button type="submit" disabled={creatingCategory || !newCategoryName.trim()} className="w-full">
+                {creatingCategory ? "Creating…" : "Create Category"}
+              </Button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {pendingDeleteChannel && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+          onClick={() => setPendingDeleteChannel(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="noschat-grain animate-rise-in relative w-full max-w-sm overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.75)]"
+          >
+            <h3 className="mb-2 font-display text-xl italic text-[#E8EAED]">
+              Delete #{pendingDeleteChannel.name}?
+            </h3>
+            <p className="mb-4 text-sm text-[#8B93A1]">
+              This will permanently delete the channel and its message history. This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPendingDeleteChannel(null)}>
+                Cancel
+              </Button>
+              <Button variant="destructive" onClick={handleDeleteChannel} disabled={deletingChannel}>
+                {deletingChannel ? "Deleting…" : "Delete Channel"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {leaveOrDeleteOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+          onClick={() => setLeaveOrDeleteOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="noschat-grain animate-rise-in relative w-full max-w-sm overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.75)]"
+          >
+            <h3 className="mb-2 font-display text-xl italic text-[#E8EAED]">
+              {isOwner ? `Delete ${detail.name}?` : `Leave ${detail.name}?`}
+            </h3>
+            <p className="mb-4 text-sm text-[#8B93A1]">
+              {isOwner
+                ? "This will permanently delete the server for all members. This cannot be undone."
+                : "You can rejoin later with a new invite."}
+            </p>
+            {leaveOrDeleteError && <p className="mb-3 text-xs text-[#EB5757]">{leaveOrDeleteError}</p>}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setLeaveOrDeleteOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={handleLeaveOrDeleteGuild}
+                disabled={leavingOrDeleting}
+              >
+                {leavingOrDeleting ? "Working…" : isOwner ? "Delete Server" : "Leave Server"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

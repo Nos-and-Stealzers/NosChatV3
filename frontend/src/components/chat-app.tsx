@@ -984,6 +984,10 @@ export function ChatApp({
             setGuildSettingsInitialTab("invites");
             setGuildSettingsOpen(true);
           }}
+          onLeftGuild={() => {
+            void refreshGuilds();
+            openFriendsView();
+          }}
         />
       ) : (
       <div
