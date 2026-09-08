@@ -110,10 +110,10 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
           <button
             onClick={toggleMic}
             title={call.micMuted ? "Unmute" : "Mute"}
-            className={`flex size-9 items-center justify-center rounded-full transition-colors ${
+            className={`flex size-9 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F0A868]/40 ${
               call.micMuted
-                ? "bg-[#EB5757]/15 text-[#EB5757]"
-                : "bg-[#1B1F27] text-[#8B93A1] hover:text-[#E8EAED]"
+                ? "bg-[#EB5757]/15 text-[#EB5757] hover:bg-[#EB5757]/25"
+                : "bg-[#1B1F27] text-[#8B93A1] hover:bg-[#242A34] hover:text-[#E8EAED]"
             }`}
           >
             {call.micMuted ? <MicOff className="size-4" /> : <Mic className="size-4" />}
@@ -123,10 +123,10 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
             <button
               onClick={toggleCamera}
               title={call.cameraOff ? "Turn camera on" : "Turn camera off"}
-              className={`flex size-9 items-center justify-center rounded-full transition-colors ${
+              className={`flex size-9 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F0A868]/40 ${
                 call.cameraOff
-                  ? "bg-[#EB5757]/15 text-[#EB5757]"
-                  : "bg-[#1B1F27] text-[#8B93A1] hover:text-[#E8EAED]"
+                  ? "bg-[#EB5757]/15 text-[#EB5757] hover:bg-[#EB5757]/25"
+                  : "bg-[#1B1F27] text-[#8B93A1] hover:bg-[#242A34] hover:text-[#E8EAED]"
               }`}
             >
               {call.cameraOff ? (
@@ -141,10 +141,10 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
             <button
               onClick={handleScreenShareClick}
               title={call.screenSharing ? "Stop sharing screen" : "Share screen"}
-              className={`flex size-9 items-center justify-center rounded-full transition-colors ${
+              className={`flex size-9 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F0A868]/40 ${
                 call.screenSharing
-                  ? "bg-[#F0A868]/20 text-[#F0A868]"
-                  : "bg-[#1B1F27] text-[#8B93A1] hover:text-[#E8EAED]"
+                  ? "bg-[#F0A868]/20 text-[#F0A868] hover:bg-[#F0A868]/30"
+                  : "bg-[#1B1F27] text-[#8B93A1] hover:bg-[#242A34] hover:text-[#E8EAED]"
               }`}
             >
               {call.screenSharing ? (
@@ -158,7 +158,7 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
           <button
             onClick={call.status === "ringing-outgoing" ? cancelCall : hangUp}
             title="Hang up"
-            className="flex size-9 items-center justify-center rounded-full bg-[#EB5757]/15 text-[#EB5757] transition-colors hover:bg-[#EB5757]/25"
+            className="flex size-9 items-center justify-center rounded-full bg-[#EB5757]/15 text-[#EB5757] transition-colors hover:bg-[#EB5757]/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#EB5757]/40"
           >
             <PhoneOff className="size-4" />
           </button>

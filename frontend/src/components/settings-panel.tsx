@@ -273,7 +273,11 @@ export function SettingsPanel({
                 />
               ))}
               {filtered.length === 0 && (
-                <p className="py-10 text-center text-sm text-[#8B93A1]">No settings match your search.</p>
+                <div className="animate-rise-in rounded-xl border border-dashed border-[#2A2F3A] px-4 py-10 text-center">
+                  <Search className="mx-auto mb-2 size-5 text-[#8B93A1]/50" />
+                  <p className="font-display text-lg italic text-[#E8EAED]">No matches</p>
+                  <p className="mt-1 text-xs text-[#8B93A1]">No settings match your search.</p>
+                </div>
               )}
             </div>
           </div>
@@ -395,7 +399,7 @@ function GenericControl({
         aria-checked={checked}
         onClick={handleToggle}
         data-on={checked}
-        className="relative h-6 w-11 flex-none rounded-full bg-[#2A2F3A] transition-colors data-[on=true]:bg-[#F0A868]"
+        className="relative h-6 w-11 flex-none rounded-full bg-[#2A2F3A] transition-colors hover:bg-[#333A47] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F0A868]/40 data-[on=true]:bg-[#F0A868] data-[on=true]:hover:bg-[#EB9A50]"
       >
         <span
           className={`absolute top-0.5 h-5 w-5 rounded-full bg-[#E8EAED] shadow transition-transform ${checked ? "translate-x-[22px]" : "translate-x-0.5"}`}

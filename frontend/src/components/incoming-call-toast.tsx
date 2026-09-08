@@ -56,14 +56,14 @@ export function IncomingCallToast({
           <button
             onClick={() => void rejectCall()}
             title="Decline"
-            className="flex size-10 items-center justify-center rounded-full bg-[#EB5757]/15 text-[#EB5757] transition-colors hover:bg-[#EB5757]/25"
+            className="flex size-10 items-center justify-center rounded-full bg-[#EB5757]/15 text-[#EB5757] transition-colors hover:bg-[#EB5757]/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#EB5757]/40"
           >
             <PhoneOff className="size-4" />
           </button>
           <button
             onClick={() => void acceptCall()}
             title="Accept"
-            className="flex size-10 items-center justify-center rounded-full bg-[#4ADE80]/15 text-[#4ADE80] transition-colors hover:bg-[#4ADE80]/25"
+            className="flex size-10 items-center justify-center rounded-full bg-[#4ADE80]/15 text-[#4ADE80] transition-colors hover:bg-[#4ADE80]/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4ADE80]/40"
           >
             <Phone className="size-4" />
           </button>

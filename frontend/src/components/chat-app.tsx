@@ -22,6 +22,11 @@ import {
   Video,
   Bug,
   LogOut,
+  Copy,
+  CopyCheck,
+  Paperclip,
+  Smile,
+  Inbox,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,6 +56,45 @@ import { IncomingCallToast } from "@/components/incoming-call-toast";
 import { CallPanel } from "@/components/call-panel";
 
 type View = { kind: "friends" } | { kind: "dm"; dmId: string };
+
+// A small, hardcoded emoji set for the composer's quick-insert picker —
+// intentionally not a full emoji library (no new dependency), just the
+// handful that cover most casual chat reactions.
+const QUICK_EMOJIS = [
+  "😀", "😂", "😅", "😍", "🤔", "😎", "😢", "😡",
+  "👍", "👎", "🙏", "🔥", "🎉", "❤️", "💀", "👀",
+];
+
+// Skeleton row for the DM list while the initial fetch is in flight —
+// matches the real row's geometry (avatar + two lines) so nothing jumps
+// once real data replaces it.
+function DmRowSkeleton({ delay = 0 }: { delay?: number }) {
+  return (
+    <div
+      className="flex items-center gap-2.5 rounded-lg px-2.5 py-2"
+      style={{ animationDelay: `${delay}ms` }}
+    >
+      <span className="h-7 w-7 flex-none animate-pulse rounded-full bg-[#1E232C]" />
+      <span className="min-w-0 flex-1 space-y-1.5">
+        <span className="block h-3 w-2/3 animate-pulse rounded bg-[#1E232C]" />
+        <span className="block h-2.5 w-4/5 animate-pulse rounded bg-[#1E232C]/70" />
+      </span>
+    </div>
+  );
+}
+
+// Same idea for the friends grid.
+function FriendRowSkeleton({ delay = 0 }: { delay?: number }) {
+  return (
+    <div
+      className="flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5"
+      style={{ animationDelay: `${delay}ms` }}
+    >
+      <span className="h-9 w-9 flex-none animate-pulse rounded-full bg-[#1E232C]" />
+      <span className="block h-3 w-1/3 flex-1 animate-pulse rounded bg-[#1E232C]" />
+    </div>
+  );
+}
 
 function relativeTime(iso: string | null): string {
   if (!iso) return "";
@@ -244,6 +288,7 @@ export function ChatApp({
   const [myId, setMyId] = useState<string | null>(null);
   const [friends, setFriends] = useState<Friendship[]>([]);
   const [dms, setDms] = useState<DmSummary[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [view, setView] = useState<View>({ kind: "friends" });
   // On narrow screens the sidebar list and the active view can't both be on
   // screen at once, so this tracks which one is showing. Irrelevant at the
@@ -272,9 +317,48 @@ export function ChatApp({
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const settingsRef = useRef(settings);
+  // Which DM row(s) should briefly pulse/scale their unread badge — set
+  // when a new incoming message bumps a DM's unread count, cleared shortly
+  // after so it reads as a one-shot "ping" rather than a permanent effect.
+  const [pulsingDms, setPulsingDms] = useState<Record<string, boolean>>({});
+  const pulseTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // "Copy message" affordance state on the hover toolbar — tracks which
+  // message id was just copied so the icon can flash a checkmark.
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  // Composer quick-emoji picker open/closed.
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+
+  useEffect(() => {
+    if (!emojiPickerOpen) return;
+    function onDocClick(e: MouseEvent) {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+        setEmojiPickerOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [emojiPickerOpen]);
+
+  async function handleCopyMessage(id: string, content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(id);
+      setTimeout(() => setCopiedMessageId((cur) => (cur === id ? null : cur)), 1500);
+    } catch {
+      // Clipboard permission denied or unavailable — silently no-op, not
+      // worth surfacing an error banner for a nice-to-have affordance.
+    }
+  }
+
+  function insertEmoji(emoji: string) {
+    setComposer((prev) => prev + emoji);
+    setEmojiPickerOpen(false);
+    composerRef.current?.focus();
+  }
 
   const refreshFriends = useCallback(async () => {
     const token = await getToken();
@@ -317,6 +401,7 @@ export function ChatApp({
         );
       }
       await Promise.all([refreshFriends(), refreshDms()]);
+      setInitialLoading(false);
     })();
     // Runs once on mount — refreshFriends/refreshDms are stable-enough
     // callbacks and re-running this on every getToken identity change would
@@ -356,6 +441,16 @@ export function ChatApp({
           updated.sort((a, b) =>
             (b.last_message_at ?? "").localeCompare(a.last_message_at ?? ""),
           );
+          if (bumpsUnread) {
+            const dmId = m.dm_id;
+            setPulsingDms((p) => ({ ...p, [dmId]: true }));
+            const existingPulse = pulseTimeouts.current[dmId];
+            if (existingPulse) clearTimeout(existingPulse);
+            pulseTimeouts.current[dmId] = setTimeout(() => {
+              setPulsingDms((p) => ({ ...p, [dmId]: false }));
+              delete pulseTimeouts.current[dmId];
+            }, 600);
+          }
           return updated;
         });
         // A message landing while its DM is the open one counts as read
@@ -403,6 +498,7 @@ export function ChatApp({
   useEffect(() => {
     return () => {
       Object.values(typingTimeouts.current).forEach(clearTimeout);
+      Object.values(pulseTimeouts.current).forEach(clearTimeout);
     };
   }, []);
 
@@ -711,13 +807,21 @@ export function ChatApp({
               className="mx-0.5 mb-1.5 h-8 w-[calc(100%-4px)] rounded-md border border-[#2A2F3A] bg-[#0F1217]/60 px-2.5 text-xs text-[#E8EAED] placeholder:text-[#8B93A1]/60 outline-none focus:border-[#F0A868]/40"
             />
           )}
-          {dms.length === 0 && (
-            <p className="px-2.5 py-2 text-xs leading-relaxed text-[#8B93A1]/70">
-              Add a friend to start a conversation.
-            </p>
+          {dms.length === 0 && !initialLoading && (
+            <div className="animate-rise-in mt-2 rounded-xl border border-dashed border-[#2A2F3A] px-4 py-8 text-center">
+              <Inbox className="mx-auto mb-2 size-6 text-[#8B93A1]/50" />
+              <p className="font-display text-lg italic text-[#E8EAED]">
+                Nobody here yet
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-[#8B93A1]">
+                Add a friend to start a conversation.
+              </p>
+            </div>
           )}
           <div className="space-y-0.5">
-            {dms
+            {initialLoading
+              ? [0, 60, 120].map((delay) => <DmRowSkeleton key={delay} delay={delay} />)
+              : dms
               .filter((dm) => {
                 if (!dmFilter.trim()) return true;
                 const label = (
@@ -737,12 +841,13 @@ export function ChatApp({
               })
               .map((dm) => {
                 const label = dm.other_username ?? dm.other_email ?? "Unknown";
+                const isActive = view.kind === "dm" && view.dmId === dm.id;
                 return (
                   <button
                     key={dm.id}
                     onClick={() => openDmView(dm.id)}
-                    data-active={view.kind === "dm" && view.dmId === dm.id}
-                    className="group relative flex w-full items-center gap-2.5 overflow-hidden rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[#1B1F27] data-[active=true]:bg-[#1B1F27]"
+                    data-active={isActive}
+                    className="group relative flex w-full items-center gap-2.5 overflow-hidden rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[#1B1F27] data-[active=true]:bg-[#1E232C] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#F0A868]/40"
                   >
                     <span className="absolute inset-y-1 left-0 w-0.5 scale-y-0 rounded-full bg-[#F0A868] transition-transform group-data-[active=true]:scale-y-100" />
                     {settings.showAvatarsInMessages && (
@@ -767,9 +872,13 @@ export function ChatApp({
                           )}
                           {dm.unread_count > 0 &&
                             (settings.unreadBadgeStyle === "dot" ? (
-                              <span className="size-2 flex-none rounded-full bg-[#F0A868]" />
+                              <span
+                                className={`size-2 flex-none rounded-full bg-[#F0A868] ${pulsingDms[dm.id] ? "animate-badge-pop" : ""}`}
+                              />
                             ) : (
-                              <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#F0A868] px-1 text-[9px] font-bold text-[#12151A]">
+                              <span
+                                className={`flex h-4 min-w-4 items-center justify-center rounded-full bg-[#F0A868] px-1 text-[9px] font-bold text-[#12151A] ${pulsingDms[dm.id] ? "animate-badge-pop" : ""}`}
+                              >
                                 {dm.unread_count > 99 ? "99+" : dm.unread_count}
                               </span>
                             ))}
@@ -867,18 +976,30 @@ export function ChatApp({
                 <p className="-mt-6 mb-6 text-xs text-[#EB5757]">{addError}</p>
               )}
 
+              {initialLoading && friends.length === 0 && (
+                <div className="mb-8 space-y-1.5">
+                  <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                    Loading friends…
+                  </p>
+                  {[0, 60, 120].map((delay) => (
+                    <FriendRowSkeleton key={delay} delay={delay} />
+                  ))}
+                </div>
+              )}
+
               {incoming.length > 0 && (
                 <div className="mb-8">
                   <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
                     Incoming Requests — {incoming.length}
                   </p>
                   <div className="space-y-1.5">
-                    {incoming.map((f) => {
+                    {incoming.map((f, i) => {
                       const label = f.username ?? f.email;
                       return (
                         <div
                           key={f.id}
-                          className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5 transition-colors hover:border-[#2A2F3A]"
+                          style={{ animationDelay: `${Math.min(i, 8) * 45}ms` }}
+                          className="animate-rise-in flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5 transition-colors hover:border-[#2A2F3A]"
                         >
                           <Avatar seed={f.user_id} label={label} />
                           <span className="min-w-0 flex-1 truncate text-sm text-[#E8EAED]">
@@ -889,7 +1010,7 @@ export function ChatApp({
                             variant="ghost"
                             onClick={() => handleAccept(f.id)}
                             title="Accept"
-                            className="hover:bg-[#4ADE80]/10"
+                            className="hover:bg-[#4ADE80]/10 focus-visible:ring-[#4ADE80]/40"
                           >
                             <Check className="size-4 text-[#4ADE80]" />
                           </Button>
@@ -898,7 +1019,7 @@ export function ChatApp({
                             variant="ghost"
                             onClick={() => handleDecline(f.id)}
                             title="Decline"
-                            className="hover:bg-[#EB5757]/10"
+                            className="hover:bg-[#EB5757]/10 focus-visible:ring-[#EB5757]/40"
                           >
                             <X className="size-4 text-[#EB5757]" />
                           </Button>
@@ -915,12 +1036,13 @@ export function ChatApp({
                     Pending — {outgoing.length}
                   </p>
                   <div className="space-y-1.5">
-                    {outgoing.map((f) => {
+                    {outgoing.map((f, i) => {
                       const label = f.username ?? f.email;
                       return (
                         <div
                           key={f.id}
-                          className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B]/50 px-3 py-2.5"
+                          style={{ animationDelay: `${Math.min(i, 8) * 45}ms` }}
+                          className="animate-rise-in flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B]/50 px-3 py-2.5"
                         >
                           <Avatar seed={f.user_id} label={label} />
                           <span className="min-w-0 flex-1 truncate text-sm text-[#8B93A1]">
@@ -937,8 +1059,9 @@ export function ChatApp({
                 <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
                   All Friends — {acceptedFriends.length}
                 </p>
-                {acceptedFriends.length === 0 ? (
+                {acceptedFriends.length === 0 && !initialLoading ? (
                   <div className="rounded-xl border border-dashed border-[#2A2F3A] px-4 py-8 text-center">
+                    <Users className="mx-auto mb-2 size-6 text-[#8B93A1]/50" />
                     <p className="font-display text-xl italic text-[#E8EAED]">
                       Nobody here yet
                     </p>
@@ -948,12 +1071,13 @@ export function ChatApp({
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-1.5 lg:grid-cols-2">
-                    {acceptedFriends.map((f) => {
+                    {acceptedFriends.map((f, i) => {
                       const label = f.username ?? f.email;
                       return (
                         <div
                           key={f.id}
-                          className="group flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-colors hover:border-[#1D2129] hover:bg-[#12151B]"
+                          style={{ animationDelay: `${Math.min(i, 12) * 35}ms` }}
+                          className="animate-rise-in group flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-colors hover:border-[#1D2129] hover:bg-[#12151B]"
                         >
                           <Avatar seed={f.user_id} label={label} />
                           <span className="min-w-0 flex-1 truncate text-sm text-[#E8EAED]">
@@ -963,7 +1087,7 @@ export function ChatApp({
                             size="sm"
                             variant="secondary"
                             onClick={() => handleOpenDm(f.user_id)}
-                            className="opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100"
+                            className="opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
                           >
                             <MessageSquare className="size-3.5" /> Message
                           </Button>
@@ -1091,16 +1215,38 @@ export function ChatApp({
                                   {clockTime(m.created_at, settings.timestampFormat === "24h")}
                                 </span>
                               )}
-                              <div
-                                className={`whitespace-pre-wrap px-3.5 py-2 text-sm leading-relaxed break-words ${bubbleCorner} ${
-                                  mine
-                                    ? settings.showGradientBackgrounds
-                                      ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_6px_16px_-8px_rgba(240,168,104,0.4)]"
-                                      : "bg-[#F0A868] text-[#12151A]"
-                                    : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
-                                }`}
-                              >
-                                {m.content}
+                              <div className="relative">
+                                <div
+                                  className={`whitespace-pre-wrap px-3.5 py-2 text-sm leading-relaxed break-words ${bubbleCorner} ${
+                                    mine
+                                      ? settings.showGradientBackgrounds
+                                        ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_6px_16px_-8px_rgba(240,168,104,0.4)]"
+                                        : "bg-[#F0A868] text-[#12151A]"
+                                      : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
+                                  }`}
+                                >
+                                  {m.content}
+                                </div>
+                                {/* Discord-style hover toolbar: copy is real
+                                    (navigator.clipboard); the rest are
+                                    honestly labeled as not-yet-wired rather
+                                    than faking functionality. */}
+                                <div
+                                  className={`pointer-events-none absolute -top-3 ${mine ? "right-2" : "left-2"} z-10 flex items-center gap-0.5 rounded-lg border border-[#2A2F3A] bg-[#12151B] p-0.5 opacity-0 shadow-[0_6px_16px_-6px_rgba(0,0,0,0.6)] transition-opacity group-hover/msg:pointer-events-auto group-hover/msg:opacity-100`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleCopyMessage(m.id, m.content)}
+                                    title="Copy message"
+                                    className="flex size-6 items-center justify-center rounded-md text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                                  >
+                                    {copiedMessageId === m.id ? (
+                                      <CopyCheck className="size-3.5 text-[#4ADE80]" />
+                                    ) : (
+                                      <Copy className="size-3.5" />
+                                    )}
+                                  </button>
+                                </div>
                               </div>
                               {!mine && (
                                 <span
@@ -1143,34 +1289,75 @@ export function ChatApp({
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
               {composer.length > settings.maxMessageLengthWarning && (
-                <p className="mb-1.5 text-right text-[10px] text-[#F0A868]">
+                <p className="animate-rise-in mb-1.5 text-right text-[10px] text-[#F0A868]">
                   {composer.length} / {settings.maxMessageLengthWarning}+ characters
                 </p>
               )}
-              <div className="relative flex items-end">
-                <Textarea
-                  ref={composerRef}
-                  rows={1}
-                  value={composer}
-                  onChange={(e) => handleComposerChange(e.target.value)}
-                  onKeyDown={handleComposerKeyDown}
-                  spellCheck={settings.spellcheckEnabled}
-                  placeholder={
-                    settings.composerPlaceholderStyle === "formal"
-                      ? `Message ${activeLabel}`
-                      : `Say something to ${activeLabel}…`
-                  }
-                  className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-12 pl-4 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"
-                />
-                <Button
-                  type="submit"
-                  size="icon"
-                  variant="ghost"
-                  disabled={!composer.trim()}
-                  className="absolute right-1.5 bottom-1.5 rounded-full text-[#8B93A1] disabled:opacity-30"
-                >
-                  <Send className="size-4" />
-                </Button>
+              <div className="relative flex items-end gap-1.5">
+                <div className="flex flex-none items-center gap-0.5 pb-1.5">
+                  <button
+                    type="button"
+                    title="Attach a file — coming soon"
+                    disabled
+                    className="flex size-8 items-center justify-center rounded-full text-[#8B93A1]/40 transition-colors disabled:cursor-not-allowed"
+                  >
+                    <Paperclip className="size-4" />
+                  </button>
+                  <div ref={emojiPickerRef} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setEmojiPickerOpen((v) => !v)}
+                      title="Insert emoji"
+                      className={`flex size-8 items-center justify-center rounded-full transition-colors hover:bg-[#1B1F27] ${emojiPickerOpen ? "bg-[#1B1F27] text-[#F0A868]" : "text-[#8B93A1] hover:text-[#E8EAED]"}`}
+                    >
+                      <Smile className="size-4" />
+                    </button>
+                    {emojiPickerOpen && (
+                      <div className="animate-rise-in absolute bottom-11 left-0 z-50 grid w-56 grid-cols-8 gap-0.5 rounded-xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-2 shadow-[0_0_0_1px_rgba(240,168,104,0.06),0_20px_50px_-15px_rgba(0,0,0,0.7)]">
+                        {QUICK_EMOJIS.map((emoji) => (
+                          <button
+                            key={emoji}
+                            type="button"
+                            onClick={() => insertEmoji(emoji)}
+                            className="flex size-6 items-center justify-center rounded-md text-base transition-colors hover:bg-[#1B1F27]"
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="relative flex flex-1 items-end">
+                  <Textarea
+                    ref={composerRef}
+                    rows={1}
+                    value={composer}
+                    onChange={(e) => handleComposerChange(e.target.value)}
+                    onKeyDown={handleComposerKeyDown}
+                    spellCheck={settings.spellcheckEnabled}
+                    placeholder={
+                      settings.composerPlaceholderStyle === "formal"
+                        ? `Message ${activeLabel}`
+                        : `Say something to ${activeLabel}…`
+                    }
+                    className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-12 pl-4 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"
+                  />
+                  <Button
+                    type="submit"
+                    size="icon"
+                    variant="ghost"
+                    disabled={!composer.trim()}
+                    title="Send message"
+                    className={`absolute right-1.5 bottom-1.5 rounded-full transition-all duration-200 ${
+                      composer.trim()
+                        ? "bg-[#F0A868]/15 text-[#F0A868] hover:bg-[#F0A868]/25"
+                        : "text-[#8B93A1] opacity-30"
+                    }`}
+                  >
+                    <Send className="size-4" />
+                  </Button>
+                </div>
               </div>
             </form>
           </>

@@ -148,7 +148,18 @@ SECTION 4 — FRONTEND HOSTING (Vercel, recommended)
    (the last two point at wherever your backend ends up — homelab or VPS,
    from Sections 2/3 above)
 4. Deploy. Vercel runs `npm run build` automatically.
-5. Once live, set up the Clerk webhook (see Section 5's note on
+5. Authorize your production domain in Clerk (REQUIRED — sign-in will fail
+   with a cross-origin error on the live domain until this is done):
+     Clerk dashboard -> your app -> Configure -> Domains, add your exact
+     production URL (e.g. https://noschatv2.noslab.fun), OR via the API:
+       curl -X PATCH https://api.clerk.com/v1/instance \
+         -H "Authorization: Bearer <CLERK_SECRET_KEY>" \
+         -H "Content-Type: application/json" \
+         -d '{"allowed_origins": ["https://your-domain.example.com"]}'
+     (This has already been done for noschatv2.noslab.fun on the Clerk
+     instance currently wired into this repo's .env.local.example — only
+     re-do this step if you rotate to a different Clerk application.)
+6. Once live, set up the Clerk webhook (see Section 5's note on
    CLERK_WEBHOOK_SECRET) pointing at
    https://your-domain.example.com/webhooks/clerk (your backend's public
    URL, not Vercel's).
