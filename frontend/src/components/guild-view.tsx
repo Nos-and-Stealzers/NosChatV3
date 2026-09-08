@@ -34,6 +34,7 @@ import {
   getGuild,
   listGuildMessages,
   sendGuildMessage,
+  listGuildMembers,
   hasPermission,
   PERMISSIONS,
   type GuildDetail,
@@ -118,6 +119,10 @@ export function GuildView({
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [messagesByChannel, setMessagesByChannel] = useState<Record<string, GuildMessage[]>>({});
   const [composer, setComposer] = useState("");
+  // user_id -> display name (nickname if set, else username), fetched once
+  // per guild so message/voice-presence lists can show real names instead
+  // of raw UUIDs.
+  const [memberNames, setMemberNames] = useState<Record<string, string>>({});
   // channel_id -> user_ids currently in that voice channel (real-time,
   // independent of whether *we* are connected to it).
   const [voicePresence, setVoicePresence] = useState<Record<string, string[]>>({});
@@ -140,8 +145,39 @@ export function GuildView({
   useEffect(() => {
     setDetail(null);
     setActiveChannelId(null);
+    setMemberNames({});
     void refreshDetail();
   }, [refreshDetail]);
+
+  // Fetch the member list once per guild so messages/voice presence can
+  // resolve raw user ids to a real display name (nickname > username >
+  // a short id fallback for members who somehow have neither).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const token = await getToken();
+      if (!token) return;
+      try {
+        const members = await listGuildMembers(token, guildId);
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        for (const m of members) {
+          map[m.user_id] = m.nickname || m.username || `user-${m.user_id.slice(0, 8)}`;
+        }
+        setMemberNames(map);
+      } catch {
+        // Non-fatal — names just fall back to raw ids below.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [getToken, guildId]);
+
+  function nameFor(userId: string): string {
+    if (userId === myId) return "You";
+    return memberNames[userId] ?? userId;
+  }
 
   // Default to the first text channel once channels load.
   useEffect(() => {
@@ -329,8 +365,8 @@ export function GuildView({
                             <div className="ml-6 flex flex-col gap-1 py-1">
                               {presentUsers.map((uid) => (
                                 <div key={uid} className="flex items-center gap-1.5 text-xs text-[#8B93A1]">
-                                  <Avatar seed={uid} label={uid} size="sm" />
-                                  <span className="truncate">{uid === myId ? "You" : uid}</span>
+                                  <Avatar seed={uid} label={nameFor(uid)} size="sm" />
+                                  <span className="truncate">{nameFor(uid)}</span>
                                 </div>
                               ))}
                             </div>
@@ -400,11 +436,11 @@ export function GuildView({
                 <div className="space-y-4">
                   {activeMessages.map((m) => (
                     <div key={m.id} className="animate-rise-in flex gap-2.5">
-                      <Avatar seed={m.sender_id} label={m.sender_id === myId ? "You" : m.sender_id} />
+                      <Avatar seed={m.sender_id} label={nameFor(m.sender_id)} />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-baseline gap-2">
                           <span className="text-sm font-semibold text-[#E8EAED]">
-                            {m.sender_id === myId ? "You" : m.sender_id}
+                            {nameFor(m.sender_id)}
                           </span>
                           <span className="font-mono text-[10px] text-[#8B93A1]">
                             {clockTime(m.created_at)}
@@ -478,8 +514,8 @@ export function GuildView({
                         key={userId}
                         className="flex flex-col items-center gap-2 rounded-xl border border-[#2A2F3A] bg-[#12151B] p-4"
                       >
-                        <Avatar seed={userId} label={userId} size="lg" />
-                        <span className="truncate text-sm text-[#E8EAED]">{userId}</span>
+                        <Avatar seed={userId} label={nameFor(userId)} size="lg" />
+                        <span className="truncate text-sm text-[#E8EAED]">{nameFor(userId)}</span>
                         <span className="font-mono text-[9px] uppercase tracking-wide text-[#8B93A1]">
                           {peer.connectionState}
                         </span>
