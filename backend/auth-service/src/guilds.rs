@@ -888,7 +888,100 @@ pub async fn send_channel_message(
     });
     state.ws_hub.send_to_many(&recipient_ids, payload).await;
 
+    // The sender has, by definition, "read" their own message — advance
+    // their own read pointer too, same reasoning as dms::send_message.
+    sqlx::query(
+        "INSERT INTO guild_channel_reads (channel_id, user_id, last_read_message_id, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (channel_id, user_id) DO UPDATE SET last_read_message_id = $3, updated_at = now()",
+    )
+    .bind(channel_id)
+    .bind(me)
+    .bind(msg.id)
+    .execute(&state.db)
+    .await
+    .map_err(internal_err)?;
+
     Ok(Json(msg))
+}
+
+/// `POST /guilds/:id/channels/:channel_id/read` — marks the channel as
+/// read up to its latest message for the caller. Mirrors dms::mark_read.
+pub async fn mark_channel_read(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+    assert_text_channel(&state, guild_id, channel_id).await?;
+
+    let latest: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM guild_messages WHERE channel_id = $1 ORDER BY created_at DESC LIMIT 1")
+            .bind(channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal_err)?;
+
+    if let Some((last_id,)) = latest {
+        sqlx::query(
+            "INSERT INTO guild_channel_reads (channel_id, user_id, last_read_message_id, updated_at)
+             VALUES ($1, $2, $3, now())
+             ON CONFLICT (channel_id, user_id) DO UPDATE SET last_read_message_id = $3, updated_at = now()",
+        )
+        .bind(channel_id)
+        .bind(me)
+        .bind(last_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+    }
+
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ChannelUnread {
+    pub channel_id: Uuid,
+    pub unread_count: i64,
+}
+
+/// `GET /guilds/:id/unread` — per-text-channel unread counts for the
+/// caller, powering the guild-rail's unread ping dot and the channel
+/// sidebar's per-channel unread indicator. Only counts messages sent by
+/// *other* users (mirrors dms::list_dms' unread lateral join), and only
+/// over channels the caller can actually VIEW.
+pub async fn list_unread(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Vec<ChannelUnread>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+
+    let rows: Vec<ChannelUnread> = sqlx::query_as(
+        r#"
+        SELECT c.id AS channel_id, COUNT(m.id) AS unread_count
+        FROM guild_channels c
+        LEFT JOIN guild_channel_reads r ON r.channel_id = c.id AND r.user_id = $2
+        LEFT JOIN guild_messages m ON m.channel_id = c.id
+            AND m.sender_id <> $2
+            AND (
+                r.last_read_message_id IS NULL
+                OR m.created_at > (SELECT created_at FROM guild_messages WHERE id = r.last_read_message_id)
+            )
+        WHERE c.guild_id = $1 AND c.kind = 'text'
+        GROUP BY c.id
+        HAVING COUNT(m.id) > 0
+        "#,
+    )
+    .bind(guild_id)
+    .bind(me)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows))
 }
 
 #[derive(Deserialize)]

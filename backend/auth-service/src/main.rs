@@ -190,6 +190,8 @@ async fn main() -> anyhow::Result<()> {
             "/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}/reactions",
             post(guilds::toggle_channel_reaction),
         )
+        .route("/guilds/{guild_id}/channels/{channel_id}/read", post(guilds::mark_channel_read))
+        .route("/guilds/{id}/unread", get(guilds::list_unread))
         .route("/guilds/{id}/categories", post(guilds::create_category))
         .route("/guilds/{id}/roles", get(guilds::list_roles).post(guilds::create_role))
         .route(
