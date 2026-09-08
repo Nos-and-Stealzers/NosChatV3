@@ -41,9 +41,11 @@ import {
   type GuildChannel,
   type GuildMessage,
   type ChannelCategory,
+  type GuildMember,
 } from "@/lib/backend-api";
 import { useRealtime } from "@/lib/realtime-context";
 import { useVoice } from "@/lib/voice-context";
+import { Users } from "lucide-react";
 
 function Avatar({
   seed,
@@ -123,6 +125,8 @@ export function GuildView({
   // per guild so message/voice-presence lists can show real names instead
   // of raw UUIDs.
   const [memberNames, setMemberNames] = useState<Record<string, string>>({});
+  const [members, setMembers] = useState<GuildMember[]>([]);
+  const [showMemberList, setShowMemberList] = useState(true);
   // channel_id -> user_ids currently in that voice channel (real-time,
   // independent of whether *we* are connected to it).
   const [voicePresence, setVoicePresence] = useState<Record<string, string[]>>({});
@@ -160,6 +164,7 @@ export function GuildView({
       try {
         const members = await listGuildMembers(token, guildId);
         if (cancelled) return;
+        setMembers(members);
         const map: Record<string, string> = {};
         for (const m of members) {
           map[m.user_id] = m.nickname || m.username || `user-${m.user_id.slice(0, 8)}`;
@@ -287,6 +292,35 @@ export function GuildView({
   const groups = groupChannels(detail.categories, detail.channels);
   const activeMessages = activeChannel ? (messagesByChannel[activeChannel.id] ?? []) : [];
   const inVoiceChannel = voice.channelId === activeChannel?.id;
+
+  // Anyone present in any voice channel right now counts as "in voice" for
+  // the member list badge — the only real-time presence signal this app
+  // has (there's no general online/offline tracking for guild members).
+  const membersInVoice = new Set(Object.values(voicePresence).flat());
+
+  // Group members by their highest-position role (Discord-style member
+  // list sections), falling back to "Members" for anyone with only the
+  // default @everyone role.
+  const roleGroups: { roleName: string; roleColor: string | null; members: GuildMember[] }[] = (() => {
+    const byRole = new Map<string, { roleName: string; roleColor: string | null; members: GuildMember[] }>();
+    const noRole: GuildMember[] = [];
+    for (const m of members) {
+      const nonDefaultRoles = m.roles.filter((r) => r.name !== "@everyone");
+      if (nonDefaultRoles.length === 0) {
+        noRole.push(m);
+        continue;
+      }
+      const top = nonDefaultRoles[0];
+      const key = top.id;
+      if (!byRole.has(key)) {
+        byRole.set(key, { roleName: top.name, roleColor: top.color, members: [] });
+      }
+      byRole.get(key)!.members.push(m);
+    }
+    const groups = [...byRole.values()];
+    if (noRole.length > 0) groups.push({ roleName: "Members", roleColor: null, members: noRole });
+    return groups;
+  })();
 
   return (
     <div className="flex min-w-0 flex-1">
@@ -419,8 +453,20 @@ export function GuildView({
                   <span className="truncate text-xs text-[#8B93A1]">{activeChannel.topic}</span>
                 </>
               )}
+              <div className="flex-1" />
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={() => setShowMemberList((v) => !v)}
+                title={showMemberList ? "Hide member list" : "Show member list"}
+                className={showMemberList ? "text-[#F0A868]" : "text-[#8B93A1]"}
+              >
+                <Users className="size-4" />
+              </Button>
             </div>
 
+            <div className="flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
             <div ref={scrollRef} className="noschat-scroll flex-1 overflow-y-auto px-4 py-5 md:px-6">
               {activeMessages.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
@@ -483,6 +529,47 @@ export function GuildView({
                 </Button>
               </div>
             </form>
+            </div>
+
+            {showMemberList && (
+              <div className="noschat-scroll flex w-56 flex-none flex-col gap-4 overflow-y-auto border-l border-[#1D2129] bg-[#12151B] px-3 py-4">
+                {roleGroups.length === 0 && members.length === 0 ? (
+                  <p className="px-1 text-xs text-[#8B93A1]">Loading members…</p>
+                ) : (
+                  roleGroups.map((g) => (
+                    <div key={g.roleName}>
+                      <p
+                        className="mb-1.5 px-1 font-mono text-[10px] uppercase tracking-[0.15em]"
+                        style={{ color: g.roleColor ?? "#8B93A1" }}
+                      >
+                        {g.roleName} — {g.members.length}
+                      </p>
+                      <div className="space-y-0.5">
+                        {g.members.map((m) => {
+                          const label = m.nickname || m.username || `user-${m.user_id.slice(0, 8)}`;
+                          const inVoice = membersInVoice.has(m.user_id);
+                          return (
+                            <div
+                              key={m.user_id}
+                              className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-[#1B1F27]"
+                            >
+                              <Avatar seed={m.user_id} label={label} size="sm" />
+                              <span className="min-w-0 flex-1 truncate text-sm text-[#C7CDD6]">
+                                {m.user_id === myId ? "You" : label}
+                              </span>
+                              {inVoice && (
+                                <Volume2 className="size-3.5 flex-none text-[#4ADE80]" />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+            </div>
           </>
         ) : (
           <>
