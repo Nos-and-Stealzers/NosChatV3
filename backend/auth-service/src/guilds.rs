@@ -243,6 +243,46 @@ pub struct GuildMessageView {
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
+    #[sqlx(skip)]
+    pub attachment: Option<GuildAttachmentMeta>,
+}
+
+#[derive(Serialize)]
+pub struct GuildAttachmentMeta {
+    pub filename: String,
+    pub mime: String,
+    pub size: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct GuildMessageRow {
+    id: Uuid,
+    channel_id: Uuid,
+    sender_id: Uuid,
+    content: String,
+    created_at: DateTime<Utc>,
+    edited_at: Option<DateTime<Utc>>,
+    attachment_mime: Option<String>,
+    attachment_filename: Option<String>,
+    attachment_size: Option<i32>,
+}
+
+impl From<GuildMessageRow> for GuildMessageView {
+    fn from(r: GuildMessageRow) -> Self {
+        let attachment = match (r.attachment_mime, r.attachment_filename, r.attachment_size) {
+            (Some(mime), Some(filename), Some(size)) => Some(GuildAttachmentMeta { filename, mime, size }),
+            _ => None,
+        };
+        GuildMessageView {
+            id: r.id,
+            channel_id: r.channel_id,
+            sender_id: r.sender_id,
+            content: r.content,
+            created_at: r.created_at,
+            edited_at: r.edited_at,
+            attachment,
+        }
+    }
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -272,6 +312,12 @@ pub struct CreateGuildBody {
 /// server; this is just the seed values used the one time it's created).
 const DEFAULT_COMMUNITY_NAME: &str = "NosChat Community";
 const DEFAULT_COMMUNITY_ICON: &str = "#5FD9C4";
+
+/// Same cap as dms::MAX_ATTACHMENT_BYTES (kept as a separate constant
+/// since that one is private to dms.rs) — 20MB is generous for real
+/// images/short clips/small documents while staying sane for inline
+/// Postgres storage.
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
 /// Idempotently returns the id of the single shared default-community
 /// guild, creating it (with a starter category + a handful of text/voice
@@ -1210,10 +1256,11 @@ pub async fn list_channel_messages(
     require_permission(&state, guild_id, me, PERM_VIEW_CHANNELS).await?;
     assert_text_channel(&state, guild_id, channel_id).await?;
 
-    let rows: Vec<GuildMessageView> = sqlx::query_as(
+    let rows: Vec<GuildMessageRow> = sqlx::query_as(
         r#"
         SELECT * FROM (
-            SELECT id, channel_id, sender_id, content, created_at, edited_at
+            SELECT id, channel_id, sender_id, content, created_at, edited_at,
+                   attachment_mime, attachment_filename, attachment_size
             FROM guild_messages WHERE channel_id = $1
             ORDER BY created_at DESC LIMIT 50
         ) recent ORDER BY created_at ASC
@@ -1224,45 +1271,80 @@ pub async fn list_channel_messages(
     .await
     .map_err(internal_err)?;
 
-    Ok(Json(rows))
+    Ok(Json(rows.into_iter().map(GuildMessageView::from).collect()))
 }
 
-#[derive(Deserialize)]
-pub struct SendGuildMessageBody {
-    pub content: String,
-}
-
-/// `POST /guilds/:id/channels/:channel_id/messages` — persists then fans
-/// out to every online guild member over the WS hub. Requires
-/// SEND_MESSAGES.
+/// `POST /guilds/:id/channels/:channel_id/messages` — multipart form:
+/// `content` text field (may be empty only if `file` is present) plus an
+/// optional `file` field. Persists then fans out to every online guild
+/// member over the WS hub. Requires SEND_MESSAGES.
 pub async fn send_channel_message(
     State(state): State<AppState>,
     ClerkUser(claims): ClerkUser,
     Path((guild_id, channel_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<SendGuildMessageBody>,
+    mut multipart: Multipart,
 ) -> Result<Json<GuildMessageView>, ApiError> {
     let me = local_user_id(&state, &claims.sub).await?;
     require_permission(&state, guild_id, me, PERM_SEND_MESSAGES).await?;
     assert_text_channel(&state, guild_id, channel_id).await?;
 
-    let content = body.content.trim();
-    if content.is_empty() {
+    let mut content = String::new();
+    let mut attachment: Option<(Vec<u8>, String, String)> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| bad_request(&format!("malformed upload: {e}")))? {
+        match field.name() {
+            Some("content") => {
+                content = field.text().await.map_err(|e| bad_request(&format!("bad content field: {e}")))?;
+            }
+            Some("file") => {
+                let filename = field.file_name().unwrap_or("attachment").to_string();
+                let mime = field.content_type().unwrap_or("application/octet-stream").to_string();
+                let data = field.bytes().await.map_err(|e| bad_request(&format!("failed reading upload: {e}")))?;
+                if data.len() > MAX_ATTACHMENT_BYTES {
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(json!({ "error": "file too large — max 20MB" })),
+                    ));
+                }
+                attachment = Some((data.to_vec(), mime, filename));
+            }
+            _ => {}
+        }
+    }
+
+    let content = content.trim().to_string();
+    if content.is_empty() && attachment.is_none() {
         return Err(bad_request("message can't be empty"));
     }
     if content.chars().count() > 4000 {
         return Err(bad_request("message too long (max 4000 characters)"));
     }
 
-    let msg: GuildMessageView = sqlx::query_as(
-        "INSERT INTO guild_messages (channel_id, sender_id, content) VALUES ($1, $2, $3)
-         RETURNING id, channel_id, sender_id, content, created_at, edited_at",
+    let (att_bytes, att_mime, att_filename, att_size): (Option<Vec<u8>>, Option<String>, Option<String>, Option<i32>) =
+        match attachment {
+            Some((bytes, mime, filename)) => {
+                let size = bytes.len() as i32;
+                (Some(bytes), Some(mime), Some(filename), Some(size))
+            }
+            None => (None, None, None, None),
+        };
+
+    let row: GuildMessageRow = sqlx::query_as(
+        "INSERT INTO guild_messages (channel_id, sender_id, content, attachment_data, attachment_mime, attachment_filename, attachment_size)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(channel_id)
     .bind(me)
-    .bind(content)
+    .bind(&content)
+    .bind(&att_bytes)
+    .bind(&att_mime)
+    .bind(&att_filename)
+    .bind(att_size)
     .fetch_one(&state.db)
     .await
     .map_err(internal_err)?;
+    let msg = GuildMessageView::from(row);
 
     let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
         .bind(guild_id)
@@ -1294,6 +1376,43 @@ pub async fn send_channel_message(
     .map_err(internal_err)?;
 
     Ok(Json(msg))
+}
+
+/// `GET /guilds/:id/channels/:channel_id/messages/:message_id/attachment`
+/// — streams the raw attachment bytes back. Gated behind guild membership
+/// (VIEW_CHANNELS), same reasoning as dms::get_attachment: not a bare
+/// unauthenticated `<img src>` like guild icons, since channel content can
+/// be private to members.
+pub async fn get_channel_attachment(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id, message_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_VIEW_CHANNELS).await?;
+
+    let row: Option<(Vec<u8>, String, String)> = sqlx::query_as(
+        "SELECT attachment_data, attachment_mime, attachment_filename FROM guild_messages
+         WHERE id = $1 AND channel_id = $2 AND attachment_data IS NOT NULL",
+    )
+    .bind(message_id)
+    .bind(channel_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some((data, mime, filename)) = row else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "no attachment" }))));
+    };
+
+    let disposition = format!("inline; filename=\"{}\"", filename.replace('"', ""));
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        data,
+    ))
 }
 
 /// `POST /guilds/:id/channels/:channel_id/read` — marks the channel as

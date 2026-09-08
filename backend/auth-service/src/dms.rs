@@ -1,7 +1,8 @@
 //! Direct messages between friends. See master spec Sections 9.3 and 12.
 
-use axum::extract::{Path, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,12 @@ use uuid::Uuid;
 
 use crate::clerk::ClerkUser;
 use crate::AppState;
+
+/// Attachments (DMs and guild channels) share this cap — generous enough
+/// for real images/short clips/small documents while staying sane for
+/// inline Postgres storage (no object storage service exists yet, same
+/// simplification as guild icons / custom notification sounds).
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
 async fn local_user_id(state: &AppState, clerk_sub: &str) -> Result<Uuid, (StatusCode, Json<serde_json::Value>)> {
     let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE clerk_user_id = $1")
@@ -179,6 +186,48 @@ pub struct MessageView {
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
+    #[sqlx(skip)]
+    pub attachment: Option<AttachmentMeta>,
+}
+
+#[derive(Serialize)]
+pub struct AttachmentMeta {
+    pub filename: String,
+    pub mime: String,
+    pub size: i32,
+}
+
+/// Row shape actually selected from the DB (raw attachment columns before
+/// they're folded into MessageView's `attachment` field below).
+#[derive(sqlx::FromRow)]
+struct MessageRow {
+    id: Uuid,
+    dm_id: Uuid,
+    sender_id: Uuid,
+    content: String,
+    created_at: DateTime<Utc>,
+    edited_at: Option<DateTime<Utc>>,
+    attachment_mime: Option<String>,
+    attachment_filename: Option<String>,
+    attachment_size: Option<i32>,
+}
+
+impl From<MessageRow> for MessageView {
+    fn from(r: MessageRow) -> Self {
+        let attachment = match (r.attachment_mime, r.attachment_filename, r.attachment_size) {
+            (Some(mime), Some(filename), Some(size)) => Some(AttachmentMeta { filename, mime, size }),
+            _ => None,
+        };
+        MessageView {
+            id: r.id,
+            dm_id: r.dm_id,
+            sender_id: r.sender_id,
+            content: r.content,
+            created_at: r.created_at,
+            edited_at: r.edited_at,
+            attachment,
+        }
+    }
 }
 
 async fn assert_participant(state: &AppState, dm_id: Uuid, user_id: Uuid) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -206,10 +255,11 @@ pub async fn list_messages(
     let me = local_user_id(&state, &claims.sub).await?;
     assert_participant(&state, dm_id, me).await?;
 
-    let rows: Vec<MessageView> = sqlx::query_as(
+    let rows: Vec<MessageRow> = sqlx::query_as(
         r#"
         SELECT * FROM (
-            SELECT id, dm_id, sender_id, content, created_at, edited_at
+            SELECT id, dm_id, sender_id, content, created_at, edited_at,
+                   attachment_mime, attachment_filename, attachment_size
             FROM messages WHERE dm_id = $1
             ORDER BY created_at DESC LIMIT 50
         ) recent ORDER BY created_at ASC
@@ -220,12 +270,7 @@ pub async fn list_messages(
     .await
     .map_err(internal_err)?;
 
-    Ok(Json(rows))
-}
-
-#[derive(Deserialize)]
-pub struct SendMessageBody {
-    pub content: String,
+    Ok(Json(rows.into_iter().map(MessageView::from).collect()))
 }
 
 #[derive(Deserialize)]
@@ -421,20 +466,54 @@ pub async fn reaction_summary(state: &AppState, message_id: Uuid, viewer_id: Uui
     .await
 }
 
-/// `POST /dms/:id/messages` — persists the message and pushes it over the
+/// `POST /dms/:id/messages` — multipart form: `content` (text field, may
+/// be empty only if `file` is present) and an optional `file` field for a
+/// single attachment. Persists the message and pushes it over the
 /// WebSocket hub to every participant's live connections (including the
-/// sender's other tabs/devices).
+/// sender's other tabs/devices). Attachment bytes are never included in
+/// the WS payload or the JSON list response — only metadata — the client
+/// fetches the actual bytes via GET .../attachment on demand.
 pub async fn send_message(
     State(state): State<AppState>,
     ClerkUser(claims): ClerkUser,
     Path(dm_id): Path<Uuid>,
-    Json(body): Json<SendMessageBody>,
+    mut multipart: Multipart,
 ) -> Result<Json<MessageView>, (StatusCode, Json<serde_json::Value>)> {
     let me = local_user_id(&state, &claims.sub).await?;
     assert_participant(&state, dm_id, me).await?;
 
-    let content = body.content.trim();
-    if content.is_empty() {
+    let mut content = String::new();
+    let mut attachment: Option<(Vec<u8>, String, String)> = None; // (bytes, mime, filename)
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("malformed upload: {e}") })))
+    })? {
+        match field.name() {
+            Some("content") => {
+                content = field.text().await.map_err(|e| {
+                    (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("bad content field: {e}") })))
+                })?;
+            }
+            Some("file") => {
+                let filename = field.file_name().unwrap_or("attachment").to_string();
+                let mime = field.content_type().unwrap_or("application/octet-stream").to_string();
+                let data = field.bytes().await.map_err(|e| {
+                    (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("failed reading upload: {e}") })))
+                })?;
+                if data.len() > MAX_ATTACHMENT_BYTES {
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(json!({ "error": "file too large — max 20MB" })),
+                    ));
+                }
+                attachment = Some((data.to_vec(), mime, filename));
+            }
+            _ => {}
+        }
+    }
+
+    let content = content.trim().to_string();
+    if content.is_empty() && attachment.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "message can't be empty" })),
@@ -447,16 +526,31 @@ pub async fn send_message(
         ));
     }
 
-    let msg: MessageView = sqlx::query_as(
-        "INSERT INTO messages (dm_id, sender_id, content) VALUES ($1, $2, $3)
-         RETURNING id, dm_id, sender_id, content, created_at, edited_at",
+    let (att_bytes, att_mime, att_filename, att_size): (Option<Vec<u8>>, Option<String>, Option<String>, Option<i32>) =
+        match attachment {
+            Some((bytes, mime, filename)) => {
+                let size = bytes.len() as i32;
+                (Some(bytes), Some(mime), Some(filename), Some(size))
+            }
+            None => (None, None, None, None),
+        };
+
+    let row: MessageRow = sqlx::query_as(
+        "INSERT INTO messages (dm_id, sender_id, content, attachment_data, attachment_mime, attachment_filename, attachment_size)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, dm_id, sender_id, content, created_at, edited_at, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(dm_id)
     .bind(me)
-    .bind(content)
+    .bind(&content)
+    .bind(&att_bytes)
+    .bind(&att_mime)
+    .bind(&att_filename)
+    .bind(att_size)
     .fetch_one(&state.db)
     .await
     .map_err(internal_err)?;
+    let msg = MessageView::from(row);
 
     // The sender has, by definition, "read" their own message — advance
     // their own read pointer too so their unread_count for this DM doesn't
@@ -480,6 +574,53 @@ pub async fn send_message(
     state.ws_hub.send_to_many(&recipient_ids, payload).await;
 
     Ok(Json(msg))
+}
+
+/// `GET /dms/:dm_id/messages/:message_id/attachment` — streams the raw
+/// attachment bytes back. Gated behind participant membership (unlike
+/// guild icons, DM attachments are private, so this can't be a bare
+/// unauthenticated `<img src>` the way guild icons are — the frontend
+/// fetches the bytes with fetch() + Authorization header and turns them
+/// into a blob: URL for display).
+pub async fn get_attachment(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((dm_id, message_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let me = match local_user_id(&state, &claims.sub).await {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = assert_participant(&state, dm_id, me).await {
+        return e.into_response();
+    }
+
+    let row: Option<(Vec<u8>, String, String)> = match sqlx::query_as(
+        "SELECT attachment_data, attachment_mime, attachment_filename FROM messages
+         WHERE id = $1 AND dm_id = $2 AND attachment_data IS NOT NULL",
+    )
+    .bind(message_id)
+    .bind(dm_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return internal_err(e).into_response(),
+    };
+
+    let Some((data, mime, filename)) = row else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no attachment" }))).into_response();
+    };
+
+    let disposition = format!("inline; filename=\"{}\"", filename.replace('"', ""));
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        data,
+    )
+        .into_response()
 }
 
 /// `POST /dms/:id/read` — marks every message in the DM as read for the

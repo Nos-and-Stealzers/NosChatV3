@@ -34,8 +34,10 @@ async function req<T>(
   const res = await fetch(`${AUTH_SERVICE_URL}${path}`, {
     ...init,
     headers: {
-      Authorization: `Bearer ${token}`,
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      Authorization: authHeader(token),
+      ...(init?.body && !(init.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...init?.headers,
     },
     cache: "no-store",
@@ -116,6 +118,8 @@ export type DmSummary = {
 
 export type ReactionSummary = { emoji: string; count: number; reacted_by_me: boolean };
 
+export type AttachmentMeta = { filename: string; mime: string; size: number };
+
 export type Message = {
   id: string;
   dm_id: string;
@@ -124,6 +128,7 @@ export type Message = {
   created_at: string;
   edited_at: string | null;
   reactions?: ReactionSummary[];
+  attachment?: AttachmentMeta | null;
 };
 
 export function listDms(token: string) {
@@ -141,11 +146,31 @@ export function listMessages(token: string, dmId: string) {
   return req<Message[]>(`/dms/${dmId}/messages`, token);
 }
 
-export function sendMessage(token: string, dmId: string, content: string) {
+export function sendMessage(token: string, dmId: string, content: string, file?: File) {
+  const form = new FormData();
+  form.set("content", content);
+  if (file) form.set("file", file);
   return req<Message>(`/dms/${dmId}/messages`, token, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: form,
   });
+}
+
+/**
+ * Fetches a message attachment's raw bytes as a blob: URL. Attachments are
+ * private (unlike guild icons), so they can't be a bare `<img src>` — the
+ * caller must pass the real Clerk token to authenticate the fetch. The
+ * returned URL should be revoked (URL.revokeObjectURL) when no longer
+ * needed to avoid leaking memory across a long session.
+ */
+export async function fetchDmAttachmentUrl(token: string, dmId: string, messageId: string): Promise<string> {
+  const res = await fetch(`${AUTH_SERVICE_URL}/dms/${dmId}/messages/${messageId}/attachment`, {
+    headers: { Authorization: authHeader(token) },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`attachment fetch failed with status ${res.status}`);
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 
 /**
@@ -365,6 +390,7 @@ export type GuildMessage = {
   created_at: string;
   edited_at: string | null;
   reactions?: ReactionSummary[];
+  attachment?: AttachmentMeta | null;
 };
 
 export type Invite = {
@@ -556,12 +582,31 @@ export function sendGuildMessage(
   guildId: string,
   channelId: string,
   content: string,
+  file?: File,
 ) {
+  const form = new FormData();
+  form.set("content", content);
+  if (file) form.set("file", file);
   return req<GuildMessage>(
     `/guilds/${guildId}/channels/${channelId}/messages`,
     token,
-    { method: "POST", body: JSON.stringify({ content }) },
+    { method: "POST", body: form },
   );
+}
+
+export async function fetchGuildAttachmentUrl(
+  token: string,
+  guildId: string,
+  channelId: string,
+  messageId: string,
+): Promise<string> {
+  const res = await fetch(
+    `${AUTH_SERVICE_URL}/guilds/${guildId}/channels/${channelId}/messages/${messageId}/attachment`,
+    { headers: { Authorization: authHeader(token) }, cache: "no-store" },
+  );
+  if (!res.ok) throw new Error(`attachment fetch failed with status ${res.status}`);
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 
 export function editGuildMessage(

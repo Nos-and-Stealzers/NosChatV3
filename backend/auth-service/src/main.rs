@@ -163,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/dms/{id}/messages", get(dms::list_messages).post(dms::send_message))
         .route("/dms/{dm_id}/messages/{message_id}", axum::routing::patch(dms::edit_message).delete(dms::delete_message))
         .route("/dms/{dm_id}/messages/{message_id}/reactions", post(dms::toggle_reaction))
+        .route("/dms/{dm_id}/messages/{message_id}/attachment", get(dms::get_attachment))
         .route("/dms/{id}/read", post(dms::mark_read))
         .route("/guilds", get(guilds::list_guilds).post(guilds::create_guild))
         .route("/guilds/{id}", get(guilds::get_guild).patch(guilds::update_guild).delete(guilds::delete_guild))
@@ -194,6 +195,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}",
             axum::routing::patch(guilds::edit_channel_message).delete(guilds::delete_channel_message),
+        )
+        .route(
+            "/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}/attachment",
+            get(guilds::get_channel_attachment),
         )
         .route(
             "/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}/reactions",

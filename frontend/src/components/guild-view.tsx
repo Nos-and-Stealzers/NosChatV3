@@ -33,8 +33,10 @@ import {
   Pencil,
   ArrowUp,
   ArrowDown,
+  Paperclip,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { AttachmentPreview } from "@/components/attachment-preview";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { avatarRamp, initialOf } from "@/lib/utils";
@@ -42,6 +44,7 @@ import {
   getGuild,
   listGuildMessages,
   sendGuildMessage,
+  fetchGuildAttachmentUrl,
   listGuildMembers,
   hasPermission,
   PERMISSIONS,
@@ -153,6 +156,8 @@ export function GuildView({
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [messagesByChannel, setMessagesByChannel] = useState<Record<string, GuildMessage[]>>({});
   const [composer, setComposer] = useState("");
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const attachFileInputRef = useRef<HTMLInputElement>(null);
   // user_id -> display name (nickname if set, else username), fetched once
   // per guild so message/voice-presence lists can show real names instead
   // of raw UUIDs.
@@ -517,17 +522,20 @@ export function GuildView({
 
   async function handleSend(e: FormEvent) {
     e.preventDefault();
-    if (!activeChannel || activeChannel.kind !== "text" || !composer.trim()) return;
+    if (!activeChannel || activeChannel.kind !== "text" || (!composer.trim() && !pendingFile)) return;
     const token = await getToken();
     if (!token) return;
     const content = composer.trim();
+    const file = pendingFile;
     const channelId = activeChannel.id;
     setComposer("");
+    setPendingFile(null);
     try {
-      await sendGuildMessage(token, guildId, channelId, content);
+      await sendGuildMessage(token, guildId, channelId, content, file ?? undefined);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Failed to send message");
       setComposer(content);
+      setPendingFile(file);
     }
   }
 
@@ -984,6 +992,16 @@ export function GuildView({
                               {m.content}
                             </p>
                           )}
+                          {m.attachment && (
+                            <AttachmentPreview
+                              attachment={m.attachment}
+                              load={async () => {
+                                const token = await getToken();
+                                if (!token) throw new Error("not signed in");
+                                return fetchGuildAttachmentUrl(token, guildId, activeChannel.id, m.id);
+                              }}
+                            />
+                          )}
                           <ReactionBar
                             reactions={m.reactions}
                             onToggle={(emoji) => void handleToggleReaction(activeChannel.id, m.id, emoji)}
@@ -997,7 +1015,41 @@ export function GuildView({
             </div>
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
+              {pendingFile && (
+                <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
+                  <Paperclip className="size-3.5 shrink-0 text-[#8B93A1]" />
+                  <span className="min-w-0 flex-1 truncate">{pendingFile.name}</span>
+                  <span className="shrink-0 text-[#8B93A1]">
+                    {(pendingFile.size / 1024).toFixed(0)} KB
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPendingFile(null)}
+                    className="shrink-0 text-[#8B93A1] transition-colors hover:text-[#E8EAED]"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              )}
               <div className="relative flex items-end gap-1.5">
+                <input
+                  ref={attachFileInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) setPendingFile(f);
+                    e.target.value = "";
+                  }}
+                />
+                <button
+                  type="button"
+                  title="Attach a file"
+                  onClick={() => attachFileInputRef.current?.click()}
+                  className="absolute bottom-2.5 left-2.5 z-10 flex size-8 items-center justify-center rounded-full text-[#8B93A1] transition-colors hover:bg-[#1E232C] hover:text-[#E8EAED]"
+                >
+                  <Paperclip className="size-4" />
+                </button>
                 <Textarea
                   ref={composerRef}
                   rows={1}
@@ -1005,16 +1057,16 @@ export function GuildView({
                   onChange={(e) => setComposer(e.target.value)}
                   onKeyDown={handleComposerKeyDown}
                   placeholder={`Message #${activeChannel.name}`}
-                  className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-12 pl-4 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"
+                  className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-12 pl-11 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"
                 />
                 <Button
                   type="submit"
                   size="icon"
                   variant="ghost"
-                  disabled={!composer.trim()}
+                  disabled={!composer.trim() && !pendingFile}
                   title="Send message"
                   className={`absolute right-1.5 bottom-1.5 rounded-full transition-all duration-200 ${
-                    composer.trim()
+                    composer.trim() || pendingFile
                       ? "bg-[#F0A868]/15 text-[#F0A868] hover:bg-[#F0A868]/25"
                       : "text-[#8B93A1] opacity-30"
                   }`}

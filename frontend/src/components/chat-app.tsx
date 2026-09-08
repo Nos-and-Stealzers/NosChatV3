@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { AttachmentPreview } from "@/components/attachment-preview";
 import { Textarea } from "@/components/ui/textarea";
 import { avatarRamp, initialOf } from "@/lib/utils";
 import {
@@ -45,6 +46,7 @@ import {
   openDm,
   listMessages,
   sendMessage,
+  fetchDmAttachmentUrl,
   markDmRead,
   editDmMessage,
   deleteDmMessage,
@@ -164,6 +166,9 @@ function groupMessages(messages: Message[], windowMin: number): MessageGroup[] {
   }
   return groups;
 }
+
+// Real attachment renderer for DM/guild messages now lives in
+// attachment-preview.tsx (shared with guild-view.tsx).
 
 function Avatar({
   seed,
@@ -413,6 +418,8 @@ export function ChatApp({
     {},
   );
   const [composer, setComposer] = useState("");
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const attachFileInputRef = useRef<HTMLInputElement>(null);
   const [addUsername, setAddUsername] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
   const [addBusy, setAddBusy] = useState(false);
@@ -921,14 +928,16 @@ export function ChatApp({
 
   async function handleSend(e: FormEvent) {
     e.preventDefault();
-    if (view.kind !== "dm" || !composer.trim()) return;
+    if (view.kind !== "dm" || (!composer.trim() && !pendingFile)) return;
     const token = await getToken();
     if (!token) return;
     const content = composer.trim();
+    const file = pendingFile;
     const dmId = view.dmId;
     setComposer("");
+    setPendingFile(null);
     try {
-      await sendMessage(token, dmId, content);
+      await sendMessage(token, dmId, content, file ?? undefined);
       if (settingsRef.current.soundOnOwnSentMessage) {
         void sound.play("message");
       }
@@ -937,6 +946,7 @@ export function ChatApp({
         err instanceof Error ? err.message : "Failed to send message",
       );
       setComposer(content);
+      setPendingFile(file);
     }
   }
 
@@ -1582,6 +1592,16 @@ export function ChatApp({
                                     )}
                                   </div>
                                 )}
+                                {m.attachment && (
+                                  <AttachmentPreview
+                                    attachment={m.attachment}
+                                    load={async () => {
+                                      const token = await getToken();
+                                      if (!token) throw new Error("not signed in");
+                                      return fetchDmAttachmentUrl(token, view.dmId, m.id);
+                                    }}
+                                  />
+                                )}
                                 {/* Discord-style hover toolbar: copy, edit
                                     (own messages), delete (own messages). */}
                                 {editingMessageId !== m.id && (
@@ -1667,6 +1687,22 @@ export function ChatApp({
             </div>
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
+              {pendingFile && (
+                <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
+                  <Paperclip className="size-3.5 shrink-0 text-[#8B93A1]" />
+                  <span className="min-w-0 flex-1 truncate">{pendingFile.name}</span>
+                  <span className="shrink-0 text-[#8B93A1]">
+                    {(pendingFile.size / 1024).toFixed(0)} KB
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPendingFile(null)}
+                    className="shrink-0 text-[#8B93A1] transition-colors hover:text-[#E8EAED]"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              )}
               {composer.length > settings.maxMessageLengthWarning && (
                 <p className="animate-rise-in mb-1.5 text-right text-[10px] text-[#F0A868]">
                   {composer.length} / {settings.maxMessageLengthWarning}+ characters
@@ -1674,11 +1710,21 @@ export function ChatApp({
               )}
               <div className="relative flex items-end gap-1.5">
                 <div className="flex flex-none items-center gap-0.5 pb-1.5">
+                  <input
+                    ref={attachFileInputRef}
+                    type="file"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) setPendingFile(f);
+                      e.target.value = "";
+                    }}
+                  />
                   <button
                     type="button"
-                    title="Attach a file — coming soon"
-                    disabled
-                    className="flex size-8 items-center justify-center rounded-full text-[#8B93A1]/40 transition-colors disabled:cursor-not-allowed"
+                    title="Attach a file"
+                    onClick={() => attachFileInputRef.current?.click()}
+                    className="flex size-8 items-center justify-center rounded-full text-[#8B93A1] transition-colors hover:bg-[#1E232C] hover:text-[#E8EAED]"
                   >
                     <Paperclip className="size-4" />
                   </button>
