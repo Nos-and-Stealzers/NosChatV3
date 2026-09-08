@@ -22,6 +22,7 @@ export type BackendUser = {
   clerk_user_id: string;
   email: string;
   username: string | null;
+  is_staff: boolean;
 };
 
 async function req<T>(
@@ -513,4 +514,68 @@ export function acceptInvite(token: string, code: string) {
   return req<{ guild_id: string }>(`/invites/${code}/accept`, token, {
     method: "POST",
   });
+}
+
+// ---- Staff / admin -------------------------------------------------------
+// Every one of these hits a backend route gated by users.is_staff, which is
+// only ever set server-side (hardcoded dev-account email match) — never by
+// anything this frontend sends. A non-staff caller gets a real 403 from the
+// backend regardless of what the UI shows, so hiding the button client-side
+// is a UX nicety here, not the actual security boundary.
+
+export type AdminStats = {
+  users: number;
+  staff: number;
+  guilds: number;
+  guild_channels: number;
+  guild_messages: number;
+  dm_messages: number;
+  friendships: number;
+  live_ws_connections: number;
+};
+
+export function adminWhoAmI(token: string) {
+  return req<{ is_staff: boolean; user_id: string }>("/admin/me", token);
+}
+
+export function adminStats(token: string) {
+  return req<AdminStats>("/admin/stats", token);
+}
+
+export type AdminUserRow = {
+  id: string;
+  email: string;
+  username: string | null;
+  is_staff: boolean;
+  created_at: string;
+};
+
+export function adminListUsers(token: string, opts?: { q?: string; limit?: number; offset?: number }) {
+  const params = new URLSearchParams();
+  if (opts?.q) params.set("q", opts.q);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.offset) params.set("offset", String(opts.offset));
+  const qs = params.toString();
+  return req<AdminUserRow[]>(`/admin/users${qs ? `?${qs}` : ""}`, token);
+}
+
+export function adminDeleteUser(token: string, userId: string) {
+  return req<void>(`/admin/users/${userId}`, token, { method: "DELETE" });
+}
+
+export type AdminGuildRow = {
+  id: string;
+  name: string;
+  owner_id: string;
+  owner_email: string;
+  member_count: number;
+  created_at: string;
+};
+
+export function adminListGuilds(token: string) {
+  return req<AdminGuildRow[]>("/admin/guilds", token);
+}
+
+export function adminDeleteGuild(token: string, guildId: string) {
+  return req<void>(`/admin/guilds/${guildId}`, token, { method: "DELETE" });
 }

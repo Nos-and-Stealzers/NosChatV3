@@ -27,6 +27,7 @@ import {
   Paperclip,
   Smile,
   Inbox,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,6 +53,7 @@ import { useSoundSettings } from "@/lib/use-sound-settings";
 import { useCall } from "@/lib/call-context";
 import { useSettings } from "@/lib/settings-context";
 import { SettingsPanel } from "@/components/settings-panel";
+import { StaffPanel } from "@/components/staff-panel";
 import { IncomingCallToast } from "@/components/incoming-call-toast";
 import { CallPanel } from "@/components/call-panel";
 import { GuildRail } from "@/components/guild-rail";
@@ -203,7 +205,15 @@ function SignalDot({ connected }: { connected: boolean }) {
 // full custom-menu control) rather than <UserButton>. Real avatar/name/
 // email straight from Clerk; "Manage account" opens our Settings panel on
 // the Account category; "Sign out" calls Clerk's real signOut().
-function AccountMenu({ onOpenSettings }: { onOpenSettings: () => void }) {
+function AccountMenu({
+  onOpenSettings,
+  isStaff,
+  onOpenStaffPanel,
+}: {
+  onOpenSettings: () => void;
+  isStaff: boolean;
+  onOpenStaffPanel: () => void;
+}) {
   const { user } = useUser();
   const { signOut } = useClerk();
   const [open, setOpen] = useState(false);
@@ -261,6 +271,18 @@ function AccountMenu({ onOpenSettings }: { onOpenSettings: () => void }) {
             <Settings className="size-4 text-[#8B93A1]" />
             Manage account
           </button>
+          {isStaff && (
+            <button
+              onClick={() => {
+                setOpen(false);
+                onOpenStaffPanel();
+              }}
+              className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[#F0A868] transition-colors hover:bg-[#F0A868]/10"
+            >
+              <ShieldCheck className="size-4" />
+              Staff Panel
+            </button>
+          )}
           <button
             onClick={() => {
               setOpen(false);
@@ -291,6 +313,8 @@ export function ChatApp({
   const { settings } = useSettings();
 
   const [myId, setMyId] = useState<string | null>(null);
+  const [isStaff, setIsStaff] = useState(false);
+  const [staffPanelOpen, setStaffPanelOpen] = useState(false);
   const [friends, setFriends] = useState<Friendship[]>([]);
   const [dms, setDms] = useState<DmSummary[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -414,6 +438,7 @@ export function ChatApp({
       try {
         const me = await fetchMe(token);
         setMyId(me.id);
+        setIsStaff(me.is_staff);
       } catch (e) {
         setLoadError(
           e instanceof Error
@@ -940,7 +965,11 @@ export function ChatApp({
 
         <div className="flex flex-none items-center gap-2 border-t border-[#1D2129] bg-[#0B0D12]/60 px-2.5 py-2.5">
           <span className="relative flex-none">
-            <AccountMenu onOpenSettings={() => { setSettingsInitialCategory("account"); setSettingsOpen(true); }} />
+            <AccountMenu
+              onOpenSettings={() => { setSettingsInitialCategory("account"); setSettingsOpen(true); }}
+              isStaff={isStaff}
+              onOpenStaffPanel={() => setStaffPanelOpen(true)}
+            />
             {settings.showSignalDot && (
               <span className="pointer-events-none absolute -bottom-0.5 -right-0.5">
                 <SignalDot connected={connected} />
@@ -1460,6 +1489,10 @@ export function ChatApp({
         onSimulateConnectionLoss={forceDisconnect}
         myUserId={myId}
       />
+
+      {isStaff && (
+        <StaffPanel open={staffPanelOpen} onClose={() => setStaffPanelOpen(false)} />
+      )}
 
       {/* Developer setting: a small fixed-position debug overlay showing
           live realtime + (during a call) WebRTC connection state — real

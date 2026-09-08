@@ -109,17 +109,19 @@ pub async fn clerk_webhook(
 
             sqlx::query(
                 r#"
-                INSERT INTO users (clerk_user_id, email, username)
-                VALUES ($1, $2, $3)
+                INSERT INTO users (clerk_user_id, email, username, is_staff)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (clerk_user_id) DO UPDATE
                     SET email = EXCLUDED.email,
                         username = EXCLUDED.username,
+                        is_staff = users.is_staff OR EXCLUDED.is_staff,
                         updated_at = now()
                 "#,
             )
             .bind(&event.data.id)
             .bind(email)
             .bind(&event.data.username)
+            .bind(crate::routes::is_dev_staff_email(email))
             .execute(&state.db)
             .await
             .map_err(|e| {

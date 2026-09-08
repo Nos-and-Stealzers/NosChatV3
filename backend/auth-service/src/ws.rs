@@ -110,6 +110,15 @@ impl WsHub {
         let vc = self.voice_channels.read().await;
         vc.get(&channel_id).map(|s| s.contains(&user_id)).unwrap_or(false)
     }
+
+    /// Total live WebSocket connections across every user — used by the
+    /// staff dashboard's "live connections" stat. Counts individual
+    /// sockets, not distinct users (a user with 2 open tabs counts twice,
+    /// matching what "live connections" actually means).
+    pub async fn connection_count(&self) -> usize {
+        let conns = self.connections.read().await;
+        conns.values().map(|v| v.len()).sum()
+    }
 }
 
 #[derive(Deserialize)]

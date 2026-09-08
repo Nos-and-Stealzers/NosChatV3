@@ -6,6 +6,7 @@ mod routes;
 mod sounds;
 mod webhooks;
 mod ws;
+mod admin;
 
 use axum::{
     routing::{get, post, put},
@@ -192,6 +193,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/sounds/{slot}/preset", put(sounds::set_preset))
         .route("/me/sounds/{slot}/upload", post(sounds::upload_custom))
         .route("/me/sounds/{slot}/file", get(sounds::get_custom_file))
+        .route("/admin/me", get(admin::admin_whoami))
+        .route("/admin/stats", get(admin::admin_stats))
+        .route("/admin/users", get(admin::admin_list_users))
+        .route("/admin/users/{id}", axum::routing::delete(admin::admin_delete_user))
+        .route("/admin/guilds", get(admin::admin_list_guilds))
+        .route("/admin/guilds/{id}", axum::routing::delete(admin::admin_delete_guild))
         .fallback(routes::not_found)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

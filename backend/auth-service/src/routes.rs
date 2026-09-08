@@ -12,6 +12,17 @@ pub struct UserPublic {
     pub clerk_user_id: String,
     pub email: String,
     pub username: Option<String>,
+    pub is_staff: bool,
+}
+
+/// The ONLY email this backend will ever auto-grant staff to. Not
+/// configurable via env/request — hardcoded on purpose so granting staff
+/// access requires an actual code change + deploy, not a config file edit
+/// or (worse) a request parameter. Case-insensitive compare on sync.
+const DEV_STAFF_EMAIL: &str = "stealzers.com@gmail.com";
+
+pub fn is_dev_staff_email(email: &str) -> bool {
+    email.eq_ignore_ascii_case(DEV_STAFF_EMAIL)
 }
 
 /// `GET /me` — the reference pattern for every future protected route:
@@ -51,7 +62,7 @@ pub async fn get_or_create_local_user(
     claims: &crate::clerk::ClerkClaims,
 ) -> Result<UserPublic, (StatusCode, Json<serde_json::Value>)> {
     let existing: Option<UserPublic> = sqlx::query_as(
-        "SELECT id, clerk_user_id, email, username FROM users WHERE clerk_user_id = $1",
+        "SELECT id, clerk_user_id, email, username, is_staff FROM users WHERE clerk_user_id = $1",
     )
     .bind(&claims.sub)
     .fetch_optional(&state.db)
@@ -65,6 +76,30 @@ pub async fn get_or_create_local_user(
     })?;
 
     if let Some(user) = existing {
+        // Re-check staff eligibility on every authenticated request for an
+        // existing row too — not just at creation. This means if the dev
+        // account's row was created (e.g. by a placeholder email or before
+        // this feature existed) it self-heals to is_staff=true the next
+        // time they hit any authenticated route, without needing a manual
+        // DB fix or waiting on a webhook.
+        if !user.is_staff && is_dev_staff_email(&user.email) {
+            let updated: UserPublic = sqlx::query_as(
+                "UPDATE users SET is_staff = true WHERE id = $1
+                 RETURNING id, clerk_user_id, email, username, is_staff",
+            )
+            .bind(user.id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("failed to grant staff to {}: {e:#}", user.id);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "internal error" })),
+                )
+            })?;
+            tracing::info!("granted staff access to {} (dev account email match)", updated.id);
+            return Ok(updated);
+        }
         return Ok(user);
     }
 
@@ -86,14 +121,15 @@ pub async fn get_or_create_local_user(
 
     let user: UserPublic = sqlx::query_as(
         r#"
-        INSERT INTO users (clerk_user_id, email, username)
-        VALUES ($1, $2, NULL)
+        INSERT INTO users (clerk_user_id, email, username, is_staff)
+        VALUES ($1, $2, NULL, $3)
         ON CONFLICT (clerk_user_id) DO UPDATE SET clerk_user_id = EXCLUDED.clerk_user_id
-        RETURNING id, clerk_user_id, email, username
+        RETURNING id, clerk_user_id, email, username, is_staff
         "#,
     )
     .bind(&claims.sub)
     .bind(&email)
+    .bind(is_dev_staff_email(&email))
     .fetch_one(&state.db)
     .await
     .map_err(|e| {
