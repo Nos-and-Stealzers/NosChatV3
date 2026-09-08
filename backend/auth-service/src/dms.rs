@@ -228,6 +228,199 @@ pub struct SendMessageBody {
     pub content: String,
 }
 
+#[derive(Deserialize)]
+pub struct EditMessageBody {
+    pub content: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ReactionSummary {
+    pub emoji: String,
+    pub count: i64,
+    pub reacted_by_me: bool,
+}
+
+/// `PATCH /dms/:dm_id/messages/:message_id` — only the original sender may
+/// edit; sets `edited_at`, broadcasts a `message_edited` event to every
+/// participant.
+pub async fn edit_message(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((dm_id, message_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<EditMessageBody>,
+) -> Result<Json<MessageView>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_participant(&state, dm_id, me).await?;
+
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "message can't be empty" }))));
+    }
+    if content.chars().count() > 4000 {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "message too long (max 4000 characters)" }))));
+    }
+
+    let row: Option<MessageView> = sqlx::query_as(
+        "UPDATE messages SET content = $3, edited_at = now()
+         WHERE id = $1 AND dm_id = $2 AND sender_id = $4
+         RETURNING id, dm_id, sender_id, content, created_at, edited_at",
+    )
+    .bind(message_id)
+    .bind(dm_id)
+    .bind(content)
+    .bind(me)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some(msg) = row else {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "not found, or you're not the sender" }))));
+    };
+
+    let participants: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
+        .bind(dm_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = participants.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({ "type": "message_edited", "message": &msg })).await;
+
+    Ok(Json(msg))
+}
+
+/// `DELETE /dms/:dm_id/messages/:message_id` — only the original sender may
+/// delete. Also cleans up any reactions on it and broadcasts
+/// `message_deleted`.
+pub async fn delete_message(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((dm_id, message_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_participant(&state, dm_id, me).await?;
+
+    let mut tx = state.db.begin().await.map_err(internal_err)?;
+
+    let deleted: Option<(Uuid,)> = sqlx::query_as(
+        "DELETE FROM messages WHERE id = $1 AND dm_id = $2 AND sender_id = $3 RETURNING id",
+    )
+    .bind(message_id)
+    .bind(dm_id)
+    .bind(me)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    if deleted.is_none() {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "not found, or you're not the sender" }))));
+    }
+
+    sqlx::query("DELETE FROM message_reactions WHERE message_id = $1 AND message_kind = 'dm'")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+
+    tx.commit().await.map_err(internal_err)?;
+
+    let participants: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
+        .bind(dm_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = participants.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({ "type": "message_deleted", "dm_id": dm_id, "message_id": message_id })).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct ReactBody {
+    pub emoji: String,
+}
+
+const MAX_EMOJI_LEN: usize = 32;
+
+/// `POST /dms/:dm_id/messages/:message_id/reactions` — toggles: if you've
+/// already reacted with this emoji, removes it; otherwise adds it. Simpler
+/// client contract than separate add/remove endpoints for a UI where every
+/// reaction click is "toggle this emoji from me".
+pub async fn toggle_reaction(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((dm_id, message_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<ReactBody>,
+) -> Result<Json<Vec<ReactionSummary>>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_participant(&state, dm_id, me).await?;
+
+    let emoji = body.emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > MAX_EMOJI_LEN {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid emoji" }))));
+    }
+
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM message_reactions WHERE message_id = $1 AND message_kind = 'dm' AND user_id = $2 AND emoji = $3",
+    )
+    .bind(message_id)
+    .bind(me)
+    .bind(emoji)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    if let Some((id,)) = existing {
+        sqlx::query("DELETE FROM message_reactions WHERE id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .map_err(internal_err)?;
+    } else {
+        sqlx::query(
+            "INSERT INTO message_reactions (message_id, message_kind, user_id, emoji) VALUES ($1, 'dm', $2, $3)",
+        )
+        .bind(message_id)
+        .bind(me)
+        .bind(emoji)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+    }
+
+    let summary = reaction_summary(&state, message_id, me).await.map_err(internal_err)?;
+
+    let participants: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
+        .bind(dm_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = participants.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "reaction_update", "dm_id": dm_id, "message_id": message_id, "reactions": &summary,
+    })).await;
+
+    Ok(Json(summary))
+}
+
+/// Shared by both dms.rs and guilds.rs — aggregates reaction rows for one
+/// message into per-emoji counts plus whether `viewer_id` is among the
+/// reactors, the shape both frontends actually want to render (not raw rows).
+pub async fn reaction_summary(state: &AppState, message_id: Uuid, viewer_id: Uuid) -> Result<Vec<ReactionSummary>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT emoji, COUNT(*) AS count, bool_or(user_id = $2) AS reacted_by_me
+        FROM message_reactions
+        WHERE message_id = $1
+        GROUP BY emoji
+        ORDER BY MIN(created_at)
+        "#,
+    )
+    .bind(message_id)
+    .bind(viewer_id)
+    .fetch_all(&state.db)
+    .await
+}
+
 /// `POST /dms/:id/messages` — persists the message and pushes it over the
 /// WebSocket hub to every participant's live connections (including the
 /// sender's other tabs/devices).

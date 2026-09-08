@@ -891,9 +891,180 @@ pub async fn send_channel_message(
     Ok(Json(msg))
 }
 
-// ---------------------------------------------------------------------
-// Roles
-// ---------------------------------------------------------------------
+#[derive(Deserialize)]
+pub struct EditGuildMessageBody {
+    pub content: String,
+}
+
+/// `PATCH /guilds/:id/channels/:channel_id/messages/:message_id` — only
+/// the original sender may edit (no permission bypasses editing someone
+/// else's words, unlike delete).
+pub async fn edit_channel_message(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id, message_id)): Path<(Uuid, Uuid, Uuid)>,
+    Json(body): Json<EditGuildMessageBody>,
+) -> Result<Json<GuildMessageView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err(bad_request("message can't be empty"));
+    }
+    if content.chars().count() > 4000 {
+        return Err(bad_request("message too long (max 4000 characters)"));
+    }
+
+    let row: Option<GuildMessageView> = sqlx::query_as(
+        "UPDATE guild_messages SET content = $3, edited_at = now()
+         WHERE id = $1 AND channel_id = $2 AND sender_id = $4
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at",
+    )
+    .bind(message_id)
+    .bind(channel_id)
+    .bind(content)
+    .bind(me)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some(msg) = row else {
+        return Err(forbidden("not found, or you're not the sender"));
+    };
+
+    let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "guild_message_edited", "guild_id": guild_id, "channel_id": channel_id, "message": &msg,
+    })).await;
+
+    Ok(Json(msg))
+}
+
+/// `DELETE /guilds/:id/channels/:channel_id/messages/:message_id` — the
+/// sender can always delete their own message; anyone with MANAGE_MESSAGES
+/// can delete anyone's (moderation), matching Discord.
+pub async fn delete_channel_message(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id, message_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+
+    let owner_row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT sender_id FROM guild_messages WHERE id = $1 AND channel_id = $2",
+    )
+    .bind(message_id)
+    .bind(channel_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+    let Some((sender_id,)) = owner_row else {
+        return Err(not_found("message not found"));
+    };
+
+    if sender_id != me {
+        require_permission(&state, guild_id, me, PERM_MANAGE_MESSAGES).await?;
+    }
+
+    let mut tx = state.db.begin().await.map_err(internal_err)?;
+    sqlx::query("DELETE FROM guild_messages WHERE id = $1")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+    sqlx::query("DELETE FROM message_reactions WHERE message_id = $1 AND message_kind = 'guild'")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+    tx.commit().await.map_err(internal_err)?;
+
+    let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "guild_message_deleted", "guild_id": guild_id, "channel_id": channel_id, "message_id": message_id,
+    })).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct ReactGuildBody {
+    pub emoji: String,
+}
+
+const MAX_EMOJI_LEN_GUILD: usize = 32;
+
+/// `POST /guilds/:id/channels/:channel_id/messages/:message_id/reactions`
+/// — toggle semantics, same as the DM equivalent in dms.rs.
+pub async fn toggle_channel_reaction(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id, message_id)): Path<(Uuid, Uuid, Uuid)>,
+    Json(body): Json<ReactGuildBody>,
+) -> Result<Json<Vec<crate::dms::ReactionSummary>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_SEND_MESSAGES).await?;
+
+    let emoji = body.emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > MAX_EMOJI_LEN_GUILD {
+        return Err(bad_request("invalid emoji"));
+    }
+
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM message_reactions WHERE message_id = $1 AND message_kind = 'guild' AND user_id = $2 AND emoji = $3",
+    )
+    .bind(message_id)
+    .bind(me)
+    .bind(emoji)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    if let Some((id,)) = existing {
+        sqlx::query("DELETE FROM message_reactions WHERE id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .map_err(internal_err)?;
+    } else {
+        sqlx::query(
+            "INSERT INTO message_reactions (message_id, message_kind, user_id, emoji) VALUES ($1, 'guild', $2, $3)",
+        )
+        .bind(message_id)
+        .bind(me)
+        .bind(emoji)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+    }
+
+    let summary = crate::dms::reaction_summary(&state, message_id, me).await.map_err(internal_err)?;
+
+    let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "guild_reaction_update", "guild_id": guild_id, "channel_id": channel_id,
+        "message_id": message_id, "reactions": &summary,
+    })).await;
+
+    Ok(Json(summary))
+}
 
 /// `GET /guilds/:id/roles` — ordered by position desc.
 pub async fn list_roles(
