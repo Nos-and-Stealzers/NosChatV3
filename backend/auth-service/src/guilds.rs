@@ -1,0 +1,1283 @@
+//! Guilds ("servers"), channels, roles, and invites — Discord-style
+//! community layer. See migrations/0004_guilds.sql for the schema and the
+//! full bitfield permission layout (mirrored in the PERM_* constants below).
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use uuid::Uuid;
+
+use crate::clerk::ClerkUser;
+use crate::AppState;
+
+// ---------------------------------------------------------------------
+// Permission bits (see migrations/0004_guilds.sql for the authoritative
+// doc comment on each bit).
+// ---------------------------------------------------------------------
+pub const PERM_VIEW_CHANNELS: i64 = 1;
+pub const PERM_SEND_MESSAGES: i64 = 2;
+pub const PERM_MANAGE_MESSAGES: i64 = 4;
+pub const PERM_CONNECT: i64 = 8;
+pub const PERM_SPEAK: i64 = 16;
+pub const PERM_MANAGE_CHANNELS: i64 = 32;
+pub const PERM_MANAGE_ROLES: i64 = 64;
+pub const PERM_KICK_MEMBERS: i64 = 128;
+#[allow(dead_code)]
+pub const PERM_BAN_MEMBERS: i64 = 256;
+pub const PERM_MANAGE_GUILD: i64 = 512;
+pub const PERM_ADMINISTRATOR: i64 = 1_073_741_824;
+
+type ApiError = (StatusCode, Json<Value>);
+
+async fn local_user_id(state: &AppState, clerk_sub: &str) -> Result<Uuid, ApiError> {
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE clerk_user_id = $1")
+        .bind(clerk_sub)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    row.map(|(id,)| id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no local user row yet" })),
+        )
+    })
+}
+
+fn internal_err(e: sqlx::Error) -> ApiError {
+    tracing::error!("db error: {e:#}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "internal error" })),
+    )
+}
+
+fn bad_request(msg: &str) -> ApiError {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": msg })))
+}
+
+fn forbidden(msg: &str) -> ApiError {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": msg })))
+}
+
+fn not_found(msg: &str) -> ApiError {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": msg })))
+}
+
+/// Combined permission bits for `user_id` in `guild_id`: bit-OR of every
+/// role they hold, plus the guild's `@everyone` (is_default) role which
+/// every member implicitly has regardless of explicit assignment. Returns
+/// 0 (not an error) if the guild doesn't exist or the user isn't a member
+/// — callers layer the owner-bypass check on top of this since that's
+/// cheaper to check first in most callers.
+async fn combined_permission_bits(state: &AppState, guild_id: Uuid, user_id: Uuid) -> Result<i64, sqlx::Error> {
+    let row: (Option<i64>,) = sqlx::query_as(
+        "SELECT bit_or(permissions) FROM guild_roles
+         WHERE guild_id = $1 AND (is_default = true OR id IN (
+             SELECT role_id FROM guild_member_roles WHERE guild_id = $1 AND user_id = $2
+         ))",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(row.0.unwrap_or(0))
+}
+
+/// The permission-check helper described in the task spec: owner bypasses
+/// everything, ADMINISTRATOR bypasses everything, otherwise checks the
+/// specific bit. Returns `Ok(false)` (not an error) for a non-member.
+pub async fn has_permission(
+    state: &AppState,
+    guild_id: Uuid,
+    user_id: Uuid,
+    required_bit: i64,
+) -> Result<bool, sqlx::Error> {
+    let owner: Option<(Uuid,)> = sqlx::query_as("SELECT owner_id FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some((owner_id,)) = owner else {
+        return Ok(false);
+    };
+    if owner_id == user_id {
+        return Ok(true);
+    }
+
+    let is_member: Option<(Uuid,)> =
+        sqlx::query_as("SELECT guild_id FROM guild_members WHERE guild_id = $1 AND user_id = $2")
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if is_member.is_none() {
+        return Ok(false);
+    }
+
+    let bits = combined_permission_bits(state, guild_id, user_id).await?;
+    Ok(bits & PERM_ADMINISTRATOR != 0 || bits & required_bit != 0)
+}
+
+async fn require_permission(state: &AppState, guild_id: Uuid, user_id: Uuid, bit: i64) -> Result<(), ApiError> {
+    if has_permission(state, guild_id, user_id, bit)
+        .await
+        .map_err(internal_err)?
+    {
+        Ok(())
+    } else {
+        Err(forbidden("you don't have the required permission for this action"))
+    }
+}
+
+async fn assert_member(state: &AppState, guild_id: Uuid, user_id: Uuid) -> Result<(), ApiError> {
+    let row: Option<(Uuid,)> =
+        sqlx::query_as("SELECT guild_id FROM guild_members WHERE guild_id = $1 AND user_id = $2")
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal_err)?;
+    if row.is_none() {
+        return Err(forbidden("not a member of this guild"));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// View structs
+// ---------------------------------------------------------------------
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct GuildListItem {
+    pub id: Uuid,
+    pub name: String,
+    pub icon_color: String,
+    pub owner_id: Uuid,
+    pub member_count: i64,
+}
+
+#[derive(Serialize, sqlx::FromRow, Clone)]
+pub struct ChannelView {
+    pub id: Uuid,
+    pub guild_id: Uuid,
+    pub category_id: Option<Uuid>,
+    pub name: String,
+    pub kind: String,
+    pub position: i32,
+    pub topic: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct CategoryView {
+    pub id: Uuid,
+    pub guild_id: Uuid,
+    pub name: String,
+    pub position: i32,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct RoleView {
+    pub id: Uuid,
+    pub guild_id: Uuid,
+    pub name: String,
+    pub color: String,
+    pub position: i32,
+    pub permissions: i64,
+    pub is_default: bool,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct GuildMessageView {
+    pub id: Uuid,
+    pub channel_id: Uuid,
+    pub sender_id: Uuid,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub edited_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct InviteView {
+    pub code: String,
+    pub guild_id: Uuid,
+    pub created_by: Uuid,
+    pub max_uses: Option<i32>,
+    pub uses: i32,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------
+// Guilds
+// ---------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CreateGuildBody {
+    pub name: String,
+}
+
+/// `POST /guilds` — creates a guild, an `@everyone` role, a default
+/// `general` text channel and `General` voice channel, and makes the
+/// caller the owner + first member.
+pub async fn create_guild(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Json(body): Json<CreateGuildBody>,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(bad_request("guild name can't be empty"));
+    }
+
+    let mut tx = state.db.begin().await.map_err(internal_err)?;
+
+    let (guild_id, guild_name, icon_color, owner_id): (Uuid, String, String, Uuid) = sqlx::query_as(
+        "INSERT INTO guilds (name, owner_id) VALUES ($1, $2) RETURNING id, name, icon_color, owner_id",
+    )
+    .bind(name)
+    .bind(me)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    let default_perms = PERM_VIEW_CHANNELS | PERM_SEND_MESSAGES | PERM_CONNECT | PERM_SPEAK;
+    let (role_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO guild_roles (guild_id, name, position, permissions, is_default)
+         VALUES ($1, '@everyone', 0, $2, true) RETURNING id",
+    )
+    .bind(guild_id)
+    .bind(default_perms)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    let text_channel: ChannelView = sqlx::query_as(
+        "INSERT INTO guild_channels (guild_id, name, kind, position)
+         VALUES ($1, 'general', 'text', 0)
+         RETURNING id, guild_id, category_id, name, kind, position, topic",
+    )
+    .bind(guild_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    let voice_channel: ChannelView = sqlx::query_as(
+        "INSERT INTO guild_channels (guild_id, name, kind, position)
+         VALUES ($1, 'General', 'voice', 1)
+         RETURNING id, guild_id, category_id, name, kind, position, topic",
+    )
+    .bind(guild_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    sqlx::query("INSERT INTO guild_members (guild_id, user_id) VALUES ($1, $2)")
+        .bind(guild_id)
+        .bind(me)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+
+    sqlx::query("INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1, $2, $3)")
+        .bind(guild_id)
+        .bind(me)
+        .bind(role_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+
+    tx.commit().await.map_err(internal_err)?;
+
+    Ok(Json(json!({
+        "id": guild_id,
+        "name": guild_name,
+        "icon_color": icon_color,
+        "owner_id": owner_id,
+        "channels": [text_channel, voice_channel],
+    })))
+}
+
+/// `GET /guilds` — every guild the caller is a member of.
+pub async fn list_guilds(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+) -> Result<Json<Vec<GuildListItem>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+
+    let rows: Vec<GuildListItem> = sqlx::query_as(
+        r#"
+        SELECT
+            g.id, g.name, g.icon_color, g.owner_id,
+            (SELECT COUNT(*) FROM guild_members gm2 WHERE gm2.guild_id = g.id) AS member_count
+        FROM guilds g
+        JOIN guild_members gm ON gm.guild_id = g.id AND gm.user_id = $1
+        ORDER BY g.name
+        "#,
+    )
+    .bind(me)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows))
+}
+
+/// `GET /guilds/:id` — guild detail: identity, your computed permission
+/// bits, your roles, and the full channel/category layout.
+pub async fn get_guild(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+
+    let guild: Option<(Uuid, String, String, Uuid)> =
+        sqlx::query_as("SELECT id, name, icon_color, owner_id FROM guilds WHERE id = $1")
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal_err)?;
+    let Some((id, name, icon_color, owner_id)) = guild else {
+        return Err(not_found("guild not found"));
+    };
+
+    let categories: Vec<CategoryView> = sqlx::query_as(
+        "SELECT id, guild_id, name, position FROM channel_categories WHERE guild_id = $1 ORDER BY position",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let channels: Vec<ChannelView> = sqlx::query_as(
+        "SELECT id, guild_id, category_id, name, kind, position, topic FROM guild_channels WHERE guild_id = $1 ORDER BY position",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let my_roles: Vec<RoleView> = sqlx::query_as(
+        r#"
+        SELECT r.id, r.guild_id, r.name, r.color, r.position, r.permissions, r.is_default
+        FROM guild_roles r
+        WHERE r.guild_id = $1 AND (r.is_default = true OR r.id IN (
+            SELECT role_id FROM guild_member_roles WHERE guild_id = $1 AND user_id = $2
+        ))
+        ORDER BY r.position DESC
+        "#,
+    )
+    .bind(guild_id)
+    .bind(me)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let mut bits = combined_permission_bits(&state, guild_id, me).await.map_err(internal_err)?;
+    if owner_id == me {
+        bits |= PERM_ADMINISTRATOR;
+    }
+
+    Ok(Json(json!({
+        "id": id,
+        "name": name,
+        "icon_color": icon_color,
+        "owner_id": owner_id,
+        "my_permissions": bits,
+        "my_roles": my_roles,
+        "categories": categories,
+        "channels": channels,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateGuildBody {
+    pub name: Option<String>,
+    pub icon_color: Option<String>,
+}
+
+/// `PATCH /guilds/:id` — requires MANAGE_GUILD.
+pub async fn update_guild(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    Json(body): Json<UpdateGuildBody>,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    let row: Option<(Uuid, String, String)> = sqlx::query_as(
+        "UPDATE guilds SET name = COALESCE($2, name), icon_color = COALESCE($3, icon_color), updated_at = now()
+         WHERE id = $1 RETURNING id, name, icon_color",
+    )
+    .bind(guild_id)
+    .bind(body.name)
+    .bind(body.icon_color)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some((id, name, icon_color)) = row else {
+        return Err(not_found("guild not found"));
+    };
+
+    Ok(Json(json!({ "id": id, "name": name, "icon_color": icon_color })))
+}
+
+/// `DELETE /guilds/:id` — owner only, not just MANAGE_GUILD.
+pub async fn delete_guild(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+
+    let owner: Option<(Uuid,)> = sqlx::query_as("SELECT owner_id FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let Some((owner_id,)) = owner else {
+        return Err(not_found("guild not found"));
+    };
+    if owner_id != me {
+        return Err(forbidden("only the guild owner can delete it"));
+    }
+
+    sqlx::query("DELETE FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /guilds/:id/leave` — owner cannot leave (must delete instead).
+pub async fn leave_guild(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+
+    let owner: Option<(Uuid,)> = sqlx::query_as("SELECT owner_id FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let Some((owner_id,)) = owner else {
+        return Err(not_found("guild not found"));
+    };
+    if owner_id == me {
+        return Err(bad_request(
+            "the owner can't leave — delete the guild instead (ownership transfer isn't supported yet)",
+        ));
+    }
+
+    sqlx::query("DELETE FROM guild_members WHERE guild_id = $1 AND user_id = $2")
+        .bind(guild_id)
+        .bind(me)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(Json(json!({ "status": "left" })))
+}
+
+/// `GET /guilds/:id/members`
+pub async fn list_members(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+
+    let members: Vec<(Uuid, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT u.id, u.username, u.email, gm.nickname
+         FROM guild_members gm JOIN users u ON u.id = gm.user_id
+         WHERE gm.guild_id = $1 ORDER BY u.username",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let role_rows: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT gmr.user_id, r.id, r.name, r.color
+         FROM guild_member_roles gmr JOIN guild_roles r ON r.id = gmr.role_id
+         WHERE gmr.guild_id = $1",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let mut roles_by_user: HashMap<Uuid, Vec<Value>> = HashMap::new();
+    for (user_id, role_id, role_name, role_color) in role_rows {
+        roles_by_user
+            .entry(user_id)
+            .or_default()
+            .push(json!({ "id": role_id, "name": role_name, "color": role_color }));
+    }
+
+    let result: Vec<Value> = members
+        .into_iter()
+        .map(|(user_id, username, email, nickname)| {
+            json!({
+                "user_id": user_id,
+                "username": username,
+                "email": email,
+                "nickname": nickname,
+                "roles": roles_by_user.get(&user_id).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    Ok(Json(result))
+}
+
+/// `DELETE /guilds/:id/members/:user_id` — kick, requires KICK_MEMBERS.
+pub async fn kick_member(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_KICK_MEMBERS).await?;
+
+    if user_id == me {
+        return Err(bad_request("use /leave to remove yourself"));
+    }
+
+    let owner: Option<(Uuid,)> = sqlx::query_as("SELECT owner_id FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if let Some((owner_id,)) = owner {
+        if owner_id == user_id {
+            return Err(forbidden("can't kick the guild owner"));
+        }
+    }
+
+    sqlx::query("DELETE FROM guild_members WHERE guild_id = $1 AND user_id = $2")
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------
+// Channels & categories
+// ---------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CreateChannelBody {
+    pub name: String,
+    pub kind: String,
+    pub category_id: Option<Uuid>,
+}
+
+/// `POST /guilds/:id/channels` — requires MANAGE_CHANNELS.
+pub async fn create_channel(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    Json(body): Json<CreateChannelBody>,
+) -> Result<Json<ChannelView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_CHANNELS).await?;
+
+    if body.kind != "text" && body.kind != "voice" {
+        return Err(bad_request("kind must be 'text' or 'voice'"));
+    }
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(bad_request("channel name can't be empty"));
+    }
+
+    let (max_pos,): (Option<i32>,) = sqlx::query_as("SELECT MAX(position) FROM guild_channels WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let position = max_pos.unwrap_or(-1) + 1;
+
+    let channel: ChannelView = sqlx::query_as(
+        "INSERT INTO guild_channels (guild_id, category_id, name, kind, position)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, guild_id, category_id, name, kind, position, topic",
+    )
+    .bind(guild_id)
+    .bind(body.category_id)
+    .bind(name)
+    .bind(&body.kind)
+    .bind(position)
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(channel))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateChannelBody {
+    pub name: Option<String>,
+    pub topic: Option<String>,
+    pub position: Option<i32>,
+    pub category_id: Option<Uuid>,
+}
+
+/// `PATCH /guilds/:id/channels/:channel_id` — requires MANAGE_CHANNELS.
+///
+/// Deviation note: `category_id` uses a plain `Option<Uuid>`, so this
+/// endpoint can't distinguish "field omitted, leave unchanged" from
+/// "explicitly set to null, clear the category" — both currently mean
+/// "leave unchanged" since COALESCE treats JSON null the same as an
+/// absent key once deserialized. Clearing a channel's category needs a
+/// small follow-up (an `Option<Option<Uuid>>` wrapper) if that UX is
+/// needed; out of scope for this pass.
+pub async fn update_channel(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<UpdateChannelBody>,
+) -> Result<Json<ChannelView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_CHANNELS).await?;
+
+    let channel: Option<ChannelView> = sqlx::query_as(
+        "UPDATE guild_channels SET
+            name = COALESCE($3, name),
+            topic = COALESCE($4, topic),
+            position = COALESCE($5, position),
+            category_id = COALESCE($6, category_id)
+         WHERE id = $1 AND guild_id = $2
+         RETURNING id, guild_id, category_id, name, kind, position, topic",
+    )
+    .bind(channel_id)
+    .bind(guild_id)
+    .bind(body.name)
+    .bind(body.topic)
+    .bind(body.position)
+    .bind(body.category_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    channel.map(Json).ok_or_else(|| not_found("channel not found in this guild"))
+}
+
+/// `DELETE /guilds/:id/channels/:channel_id` — requires MANAGE_CHANNELS.
+pub async fn delete_channel(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_CHANNELS).await?;
+
+    sqlx::query("DELETE FROM guild_channels WHERE id = $1 AND guild_id = $2")
+        .bind(channel_id)
+        .bind(guild_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct CreateCategoryBody {
+    pub name: String,
+}
+
+/// `POST /guilds/:id/categories` — requires MANAGE_CHANNELS.
+pub async fn create_category(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    Json(body): Json<CreateCategoryBody>,
+) -> Result<Json<CategoryView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_CHANNELS).await?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(bad_request("category name can't be empty"));
+    }
+
+    let (max_pos,): (Option<i32>,) =
+        sqlx::query_as("SELECT MAX(position) FROM channel_categories WHERE guild_id = $1")
+            .bind(guild_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(internal_err)?;
+    let position = max_pos.unwrap_or(-1) + 1;
+
+    let category: CategoryView = sqlx::query_as(
+        "INSERT INTO channel_categories (guild_id, name, position) VALUES ($1, $2, $3)
+         RETURNING id, guild_id, name, position",
+    )
+    .bind(guild_id)
+    .bind(name)
+    .bind(position)
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(category))
+}
+
+// ---------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------
+
+async fn assert_text_channel(state: &AppState, guild_id: Uuid, channel_id: Uuid) -> Result<(), ApiError> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT kind FROM guild_channels WHERE id = $1 AND guild_id = $2")
+            .bind(channel_id)
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal_err)?;
+    match row {
+        Some((kind,)) if kind == "text" => Ok(()),
+        Some(_) => Err(bad_request("that channel isn't a text channel")),
+        None => Err(not_found("channel not found in this guild")),
+    }
+}
+
+/// `GET /guilds/:id/channels/:channel_id/messages` — most recent 50,
+/// oldest first. Requires VIEW_CHANNELS.
+pub async fn list_channel_messages(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Vec<GuildMessageView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_VIEW_CHANNELS).await?;
+    assert_text_channel(&state, guild_id, channel_id).await?;
+
+    let rows: Vec<GuildMessageView> = sqlx::query_as(
+        r#"
+        SELECT * FROM (
+            SELECT id, channel_id, sender_id, content, created_at, edited_at
+            FROM guild_messages WHERE channel_id = $1
+            ORDER BY created_at DESC LIMIT 50
+        ) recent ORDER BY created_at ASC
+        "#,
+    )
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+pub struct SendGuildMessageBody {
+    pub content: String,
+}
+
+/// `POST /guilds/:id/channels/:channel_id/messages` — persists then fans
+/// out to every online guild member over the WS hub. Requires
+/// SEND_MESSAGES.
+pub async fn send_channel_message(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SendGuildMessageBody>,
+) -> Result<Json<GuildMessageView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_SEND_MESSAGES).await?;
+    assert_text_channel(&state, guild_id, channel_id).await?;
+
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err(bad_request("message can't be empty"));
+    }
+    if content.chars().count() > 4000 {
+        return Err(bad_request("message too long (max 4000 characters)"));
+    }
+
+    let msg: GuildMessageView = sqlx::query_as(
+        "INSERT INTO guild_messages (channel_id, sender_id, content) VALUES ($1, $2, $3)
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at",
+    )
+    .bind(channel_id)
+    .bind(me)
+    .bind(content)
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+
+    let payload = json!({
+        "type": "guild_message",
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+        "message": &msg,
+    });
+    state.ws_hub.send_to_many(&recipient_ids, payload).await;
+
+    Ok(Json(msg))
+}
+
+// ---------------------------------------------------------------------
+// Roles
+// ---------------------------------------------------------------------
+
+/// `GET /guilds/:id/roles` — ordered by position desc.
+pub async fn list_roles(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Vec<RoleView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+
+    let roles: Vec<RoleView> = sqlx::query_as(
+        "SELECT id, guild_id, name, color, position, permissions, is_default
+         FROM guild_roles WHERE guild_id = $1 ORDER BY position DESC",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(roles))
+}
+
+#[derive(Deserialize)]
+pub struct CreateRoleBody {
+    pub name: String,
+    pub color: Option<String>,
+    pub permissions: Option<i64>,
+}
+
+/// `POST /guilds/:id/roles` — requires MANAGE_ROLES.
+pub async fn create_role(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    Json(body): Json<CreateRoleBody>,
+) -> Result<Json<RoleView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_ROLES).await?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(bad_request("role name can't be empty"));
+    }
+
+    let (max_pos,): (Option<i32>,) = sqlx::query_as("SELECT MAX(position) FROM guild_roles WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let position = max_pos.unwrap_or(0) + 1;
+
+    let role: RoleView = sqlx::query_as(
+        "INSERT INTO guild_roles (guild_id, name, color, position, permissions)
+         VALUES ($1, $2, COALESCE($3, '#8B93A1'), $4, COALESCE($5, 0))
+         RETURNING id, guild_id, name, color, position, permissions, is_default",
+    )
+    .bind(guild_id)
+    .bind(name)
+    .bind(body.color)
+    .bind(position)
+    .bind(body.permissions)
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(role))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateRoleBody {
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub permissions: Option<i64>,
+    pub position: Option<i32>,
+}
+
+/// `PATCH /guilds/:id/roles/:role_id` — requires MANAGE_ROLES. The
+/// `is_default` role's name/color/permissions/position remain editable
+/// (Discord lets you rename/recolor/re-permission @everyone); only
+/// deletion of it is blocked (see `delete_role`), since there's no field
+/// here to toggle `is_default` itself.
+pub async fn update_role(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, role_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<UpdateRoleBody>,
+) -> Result<Json<RoleView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_ROLES).await?;
+
+    let role: Option<RoleView> = sqlx::query_as(
+        "UPDATE guild_roles SET
+            name = COALESCE($3, name),
+            color = COALESCE($4, color),
+            permissions = COALESCE($5, permissions),
+            position = COALESCE($6, position)
+         WHERE id = $1 AND guild_id = $2
+         RETURNING id, guild_id, name, color, position, permissions, is_default",
+    )
+    .bind(role_id)
+    .bind(guild_id)
+    .bind(body.name)
+    .bind(body.color)
+    .bind(body.permissions)
+    .bind(body.position)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    role.map(Json).ok_or_else(|| not_found("role not found in this guild"))
+}
+
+/// `DELETE /guilds/:id/roles/:role_id` — requires MANAGE_ROLES, rejects
+/// the `is_default` role.
+pub async fn delete_role(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, role_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_ROLES).await?;
+
+    let row: Option<(bool,)> =
+        sqlx::query_as("SELECT is_default FROM guild_roles WHERE id = $1 AND guild_id = $2")
+            .bind(role_id)
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal_err)?;
+    let Some((is_default,)) = row else {
+        return Err(not_found("role not found in this guild"));
+    };
+    if is_default {
+        return Err(bad_request("can't delete the @everyone role"));
+    }
+
+    sqlx::query("DELETE FROM guild_roles WHERE id = $1 AND guild_id = $2")
+        .bind(role_id)
+        .bind(guild_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /guilds/:id/members/:user_id/roles/:role_id` — idempotent assign.
+pub async fn assign_role(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, user_id, role_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_ROLES).await?;
+
+    let role_exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM guild_roles WHERE id = $1 AND guild_id = $2")
+        .bind(role_id)
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if role_exists.is_none() {
+        return Err(not_found("role not found in this guild"));
+    }
+    assert_member(&state, guild_id, user_id).await.map_err(|_| not_found("that user isn't a member of this guild"))?;
+
+    sqlx::query(
+        "INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .bind(role_id)
+    .execute(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+/// `DELETE /guilds/:id/members/:user_id/roles/:role_id`
+pub async fn unassign_role(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, user_id, role_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_ROLES).await?;
+
+    sqlx::query("DELETE FROM guild_member_roles WHERE guild_id = $1 AND user_id = $2 AND role_id = $3")
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------
+// Invites
+// ---------------------------------------------------------------------
+
+/// Base62, 8 characters, seeded from a UUIDv4's randomness — good enough
+/// entropy (62^8 ≈ 2.18e14 combinations) without pulling in the `rand`
+/// crate as a direct dependency; collisions are handled by the
+/// retry-on-conflict loop in `create_invite` regardless.
+fn generate_invite_code() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut n = Uuid::new_v4().as_u128();
+    let mut out = Vec::with_capacity(8);
+    for _ in 0..8 {
+        let idx = (n % 62) as usize;
+        out.push(ALPHABET[idx]);
+        n /= 62;
+    }
+    String::from_utf8(out).expect("alphabet is ASCII")
+}
+
+#[derive(Deserialize)]
+pub struct CreateInviteBody {
+    pub max_uses: Option<i32>,
+    pub expires_in_hours: Option<i64>,
+}
+
+/// `POST /guilds/:id/invites` — requires MANAGE_GUILD.
+///
+/// Simplification: real Discord lets any member with CREATE_INSTANT_INVITE
+/// make one, but that bit doesn't exist in the current bitfield (see
+/// migration doc comment), so this gates on MANAGE_GUILD instead.
+pub async fn create_invite(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    Json(body): Json<CreateInviteBody>,
+) -> Result<Json<InviteView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    let expires_at = body.expires_in_hours.map(|h| Utc::now() + Duration::hours(h));
+
+    let mut attempts = 0;
+    loop {
+        let code = generate_invite_code();
+        let result: Result<InviteView, sqlx::Error> = sqlx::query_as(
+            "INSERT INTO guild_invites (code, guild_id, created_by, max_uses, expires_at)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING code, guild_id, created_by, max_uses, uses, expires_at, created_at",
+        )
+        .bind(&code)
+        .bind(guild_id)
+        .bind(me)
+        .bind(body.max_uses)
+        .bind(expires_at)
+        .fetch_one(&state.db)
+        .await;
+
+        match result {
+            Ok(invite) => return Ok(Json(invite)),
+            Err(e) => {
+                let is_code_conflict = e
+                    .as_database_error()
+                    .and_then(|de| de.code())
+                    .map(|c| c == "23505")
+                    .unwrap_or(false);
+                attempts += 1;
+                if is_code_conflict && attempts < 5 {
+                    continue;
+                }
+                return Err(internal_err(e));
+            }
+        }
+    }
+}
+
+/// `GET /guilds/:id/invites` — active invites only. Requires MANAGE_GUILD.
+pub async fn list_invites(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Vec<InviteView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    let invites: Vec<InviteView> = sqlx::query_as(
+        "SELECT code, guild_id, created_by, max_uses, uses, expires_at, created_at
+         FROM guild_invites
+         WHERE guild_id = $1
+           AND (expires_at IS NULL OR expires_at > now())
+           AND (max_uses IS NULL OR uses < max_uses)
+         ORDER BY created_at DESC",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(invites))
+}
+
+/// `DELETE /guilds/:id/invites/:code` — requires MANAGE_GUILD.
+pub async fn revoke_invite(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, code)): Path<(Uuid, String)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    sqlx::query("DELETE FROM guild_invites WHERE code = $1 AND guild_id = $2")
+        .bind(code)
+        .bind(guild_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /invites/:code` — public preview. Requires a valid Clerk JWT
+/// (like everything else) but NOT guild membership; 404s if the code
+/// doesn't exist, is expired, or is exhausted, so it can't be used to
+/// enumerate valid-but-inaccessible codes.
+pub async fn preview_invite(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(code): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    // Just needs to be a real authenticated user; no further use of `me`.
+    let _me = local_user_id(&state, &claims.sub).await?;
+
+    let row: Option<(Uuid, String, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT g.id, g.name, g.icon_color,
+               (SELECT COUNT(*) FROM guild_members gm WHERE gm.guild_id = g.id) AS member_count
+        FROM guild_invites i
+        JOIN guilds g ON g.id = i.guild_id
+        WHERE i.code = $1
+          AND (i.expires_at IS NULL OR i.expires_at > now())
+          AND (i.max_uses IS NULL OR i.uses < i.max_uses)
+        "#,
+    )
+    .bind(&code)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some((guild_id, name, icon_color, member_count)) = row else {
+        return Err(not_found("invite not found, expired, or exhausted"));
+    };
+
+    Ok(Json(json!({
+        "guild_id": guild_id,
+        "name": name,
+        "icon_color": icon_color,
+        "member_count": member_count,
+    })))
+}
+
+/// `POST /invites/:code/accept` — joins the guild (idempotent if already
+/// a member).
+pub async fn accept_invite(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(code): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+
+    let mut tx = state.db.begin().await.map_err(internal_err)?;
+
+    let invite: Option<(Uuid, Option<i32>, i32, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT guild_id, max_uses, uses, expires_at FROM guild_invites WHERE code = $1 FOR UPDATE",
+    )
+    .bind(&code)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    let Some((guild_id, max_uses, uses, expires_at)) = invite else {
+        return Err(not_found("invite not found"));
+    };
+    if let Some(exp) = expires_at {
+        if exp <= Utc::now() {
+            return Err(not_found("invite has expired"));
+        }
+    }
+    if let Some(max) = max_uses {
+        if uses >= max {
+            return Err(not_found("invite has been used up"));
+        }
+    }
+
+    let already_member: Option<(Uuid,)> =
+        sqlx::query_as("SELECT guild_id FROM guild_members WHERE guild_id = $1 AND user_id = $2")
+            .bind(guild_id)
+            .bind(me)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal_err)?;
+
+    if already_member.is_none() {
+        sqlx::query("INSERT INTO guild_members (guild_id, user_id) VALUES ($1, $2)")
+            .bind(guild_id)
+            .bind(me)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_err)?;
+
+        let default_role: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM guild_roles WHERE guild_id = $1 AND is_default = true")
+                .bind(guild_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal_err)?;
+        if let Some((role_id,)) = default_role {
+            sqlx::query(
+                "INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(guild_id)
+            .bind(me)
+            .bind(role_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_err)?;
+        }
+
+        sqlx::query("UPDATE guild_invites SET uses = uses + 1 WHERE code = $1")
+            .bind(&code)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_err)?;
+    }
+
+    tx.commit().await.map_err(internal_err)?;
+
+    Ok(Json(json!({ "guild_id": guild_id, "status": "joined" })))
+}

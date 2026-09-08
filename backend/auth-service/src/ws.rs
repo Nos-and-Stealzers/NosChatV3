@@ -14,16 +14,23 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
+use crate::guilds;
 use crate::AppState;
 
 #[derive(Clone, Default)]
 pub struct WsHub {
     connections: Arc<RwLock<HashMap<Uuid, Vec<mpsc::UnboundedSender<Value>>>>>,
+    /// In-process voice-channel presence: channel_id -> set of user_ids
+    /// currently "in" that voice channel. Purely in-memory, no DB table —
+    /// matches this hub's existing in-memory-only philosophy (see module
+    /// doc comment); presence resets on backend restart, which is fine
+    /// since it's live-only signaling state, not history.
+    voice_channels: Arc<RwLock<HashMap<Uuid, HashSet<Uuid>>>>,
 }
 
 impl WsHub {
@@ -59,6 +66,50 @@ impl WsHub {
             self.send_to(*id, payload.clone()).await;
         }
     }
+
+    /// Adds `user_id` to the voice channel's presence set and returns
+    /// everyone who was *already* in it (before this join), so the caller
+    /// can send the joiner a snapshot and broadcast the join to the rest.
+    pub async fn voice_join(&self, channel_id: Uuid, user_id: Uuid) -> Vec<Uuid> {
+        let mut vc = self.voice_channels.write().await;
+        let set = vc.entry(channel_id).or_default();
+        let existing: Vec<Uuid> = set.iter().copied().collect();
+        set.insert(user_id);
+        existing
+    }
+
+    /// Removes `user_id` from the voice channel's presence set.
+    pub async fn voice_leave(&self, channel_id: Uuid, user_id: Uuid) {
+        let mut vc = self.voice_channels.write().await;
+        if let Some(set) = vc.get_mut(&channel_id) {
+            set.remove(&user_id);
+            if set.is_empty() {
+                vc.remove(&channel_id);
+            }
+        }
+    }
+
+    /// Current members of a voice channel (after any join/leave).
+    pub async fn voice_members(&self, channel_id: Uuid) -> Vec<Uuid> {
+        let vc = self.voice_channels.read().await;
+        vc.get(&channel_id).map(|s| s.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// Every voice channel `user_id` currently appears in — used to clean
+    /// up presence on socket disconnect (a user can only realistically be
+    /// in one at a time client-side, but this doesn't assume that).
+    pub async fn voice_channels_for_user(&self, user_id: Uuid) -> Vec<Uuid> {
+        let vc = self.voice_channels.read().await;
+        vc.iter()
+            .filter(|(_, set)| set.contains(&user_id))
+            .map(|(channel_id, _)| *channel_id)
+            .collect()
+    }
+
+    pub async fn is_in_voice_channel(&self, channel_id: Uuid, user_id: Uuid) -> bool {
+        let vc = self.voice_channels.read().await;
+        vc.get(&channel_id).map(|s| s.contains(&user_id)).unwrap_or(false)
+    }
 }
 
 #[derive(Deserialize)]
@@ -91,6 +142,19 @@ enum ClientEvent {
     CallEnd { dm_id: Uuid },
     /// Callee explicitly declining an incoming ring, before ever answering.
     CallReject { dm_id: Uuid },
+
+    // ---- Guild voice-channel presence + WebRTC mesh signaling ----
+    // Unlike the 1:1 Call* variants above (keyed by dm_id, always exactly
+    // two parties), a voice channel can have N participants, each needing
+    // a separate mesh peer connection to every other participant. Offer/
+    // Answer/IceCandidate are therefore relayed 1:1 via `to`, not broadcast
+    // to the whole channel — same wire shape as Call*, just keyed by
+    // (channel_id, to) instead of dm_id.
+    VoiceJoin { channel_id: Uuid },
+    VoiceLeave { channel_id: Uuid },
+    VoiceOffer { channel_id: Uuid, to: Uuid, sdp: Value },
+    VoiceAnswer { channel_id: Uuid, to: Uuid, sdp: Value },
+    VoiceIceCandidate { channel_id: Uuid, to: Uuid, candidate: Value },
 }
 
 /// Looks up the DM's participants, confirms `user_id` is actually one of
@@ -115,6 +179,36 @@ async fn other_participants(state: &AppState, dm_id: Uuid, user_id: Uuid) -> Opt
         return None;
     }
     Some(ids.into_iter().filter(|id| *id != user_id).collect())
+}
+
+/// Looks up `channel_id`'s guild, confirms `user_id` is a guild member
+/// with CONNECT permission on it, and returns the guild_id. Used to gate
+/// `VoiceJoin`.
+async fn assert_can_connect_voice(state: &AppState, channel_id: Uuid, user_id: Uuid) -> Option<Uuid> {
+    let row: Option<(Uuid, String)> =
+        match sqlx::query_as("SELECT guild_id, kind FROM guild_channels WHERE id = $1")
+            .bind(channel_id)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::warn!("ws: failed to look up voice channel: {e}");
+                return None;
+            }
+        };
+    let (guild_id, kind) = row?;
+    if kind != "voice" {
+        return None;
+    }
+    match guilds::has_permission(state, guild_id, user_id, guilds::PERM_CONNECT).await {
+        Ok(true) => Some(guild_id),
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!("ws: permission check failed: {e}");
+            None
+        }
+    }
 }
 
 /// No persistence — typing state and call signaling are both deliberately
@@ -194,6 +288,77 @@ async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent
             let payload = json!({ "type": "call_reject", "dm_id": dm_id, "from": user_id });
             state.ws_hub.send_to_many(&others, payload).await;
         }
+
+        ClientEvent::VoiceJoin { channel_id } => {
+            if assert_can_connect_voice(state, channel_id, user_id).await.is_none() {
+                tracing::warn!("ws: user {user_id} denied voice_join on channel {channel_id}");
+                return;
+            }
+            let existing = state.ws_hub.voice_join(channel_id, user_id).await;
+
+            // Tell the joiner who's already there so they can open mesh
+            // connections to each of them.
+            let snapshot = json!({
+                "type": "voice_channel_state",
+                "channel_id": channel_id,
+                "members": existing,
+            });
+            state.ws_hub.send_to(user_id, snapshot).await;
+
+            // Tell everyone already there that a new peer joined.
+            let joined_payload = json!({
+                "type": "voice_user_joined",
+                "channel_id": channel_id,
+                "user_id": user_id,
+            });
+            state.ws_hub.send_to_many(&existing, joined_payload).await;
+        }
+        ClientEvent::VoiceLeave { channel_id } => {
+            state.ws_hub.voice_leave(channel_id, user_id).await;
+            let remaining = state.ws_hub.voice_members(channel_id).await;
+            let payload = json!({
+                "type": "voice_user_left",
+                "channel_id": channel_id,
+                "user_id": user_id,
+            });
+            state.ws_hub.send_to_many(&remaining, payload).await;
+        }
+        ClientEvent::VoiceOffer { channel_id, to, sdp } => {
+            if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {
+                return;
+            }
+            let payload = json!({
+                "type": "voice_offer",
+                "channel_id": channel_id,
+                "from": user_id,
+                "sdp": sdp,
+            });
+            state.ws_hub.send_to(to, payload).await;
+        }
+        ClientEvent::VoiceAnswer { channel_id, to, sdp } => {
+            if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {
+                return;
+            }
+            let payload = json!({
+                "type": "voice_answer",
+                "channel_id": channel_id,
+                "from": user_id,
+                "sdp": sdp,
+            });
+            state.ws_hub.send_to(to, payload).await;
+        }
+        ClientEvent::VoiceIceCandidate { channel_id, to, candidate } => {
+            if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {
+                return;
+            }
+            let payload = json!({
+                "type": "voice_ice_candidate",
+                "channel_id": channel_id,
+                "from": user_id,
+                "candidate": candidate,
+            });
+            state.ws_hub.send_to(to, payload).await;
+        }
     }
 }
 
@@ -268,5 +433,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: Uuid) {
     }
 
     state.ws_hub.prune(user_id).await;
+
+    // Clean up any voice-channel presence left behind by a closed tab/
+    // socket so remaining participants don't see a ghost peer.
+    for channel_id in state.ws_hub.voice_channels_for_user(user_id).await {
+        state.ws_hub.voice_leave(channel_id, user_id).await;
+        let remaining = state.ws_hub.voice_members(channel_id).await;
+        let payload = json!({
+            "type": "voice_user_left",
+            "channel_id": channel_id,
+            "user_id": user_id,
+        });
+        state.ws_hub.send_to_many(&remaining, payload).await;
+    }
+
     tracing::info!("ws disconnected: user {user_id}");
 }

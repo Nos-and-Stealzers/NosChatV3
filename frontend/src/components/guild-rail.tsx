@@ -1,0 +1,84 @@
+"use client";
+
+// Extends the existing 72px rail in chat-app.tsx with a horizontal divider
+// and one circular icon button per guild the user is in, plus a '+' button
+// to open the create/join modal. Deliberately NOT a standalone rail — it's
+// rendered *inside* chat-app.tsx's existing rail <div>, right after the
+// NosChat/DM button + SignalDot block, so there's only ever one rail in the
+// DOM.
+
+import { Plus } from "lucide-react";
+import type { Guild } from "@/lib/backend-api";
+
+function guildInitial(name: string): string {
+  return (name.trim()[0] ?? "?").toUpperCase();
+}
+
+function GuildIcon({
+  guild,
+  active,
+  compact,
+  onClick,
+}: {
+  guild: Guild;
+  active: boolean;
+  compact: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      data-active={active}
+      title={guild.name}
+      className={`group relative flex flex-none items-center justify-center rounded-full font-display text-base text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset] transition-all duration-200 hover:rounded-xl data-[active=true]:rounded-xl ${compact ? "h-10 w-10" : "h-12 w-12"}`}
+      style={{ backgroundColor: guild.icon_color }}
+    >
+      {guildInitial(guild.name)}
+      <span
+        className={`pointer-events-none absolute -left-3 rounded-r-full bg-white transition-all duration-150 ${
+          active
+            ? "h-5 w-1 opacity-100"
+            : "h-2 w-1 opacity-0 group-hover:h-2.5 group-hover:opacity-70"
+        }`}
+      />
+    </button>
+  );
+}
+
+export function GuildRail({
+  guilds,
+  activeGuildId,
+  compact,
+  onSelectGuild,
+  onOpenCreateJoin,
+}: {
+  guilds: Guild[];
+  activeGuildId: string | null;
+  compact: boolean;
+  onSelectGuild: (guildId: string) => void;
+  onOpenCreateJoin: () => void;
+}) {
+  return (
+    <>
+      <div className="my-1.5 h-px w-8 flex-none bg-[#1D2129]" />
+      <div className="noschat-scroll flex max-h-[40vh] w-full flex-col items-center gap-2 overflow-y-auto">
+        {guilds.map((g) => (
+          <GuildIcon
+            key={g.id}
+            guild={g}
+            active={activeGuildId === g.id}
+            compact={compact}
+            onClick={() => onSelectGuild(g.id)}
+          />
+        ))}
+      </div>
+      <button
+        onClick={onOpenCreateJoin}
+        title="Create or join a server"
+        className={`group flex flex-none items-center justify-center rounded-full border border-dashed border-[#2A2F3A] text-[#8B93A1] transition-all duration-200 hover:rounded-xl hover:border-[#F0A868]/50 hover:text-[#F0A868] ${compact ? "h-10 w-10" : "h-12 w-12"}`}
+      >
+        <Plus className="size-5" />
+      </button>
+    </>
+  );
+}

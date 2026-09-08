@@ -54,8 +54,13 @@ import { useSettings } from "@/lib/settings-context";
 import { SettingsPanel } from "@/components/settings-panel";
 import { IncomingCallToast } from "@/components/incoming-call-toast";
 import { CallPanel } from "@/components/call-panel";
+import { GuildRail } from "@/components/guild-rail";
+import { CreateJoinGuildModal } from "@/components/create-join-guild-modal";
+import { GuildView } from "@/components/guild-view";
+import { GuildSettingsModal } from "@/components/guild-settings-modal";
+import { listGuilds, type Guild } from "@/lib/backend-api";
 
-type View = { kind: "friends" } | { kind: "dm"; dmId: string };
+type View = { kind: "friends" } | { kind: "dm"; dmId: string } | { kind: "guild"; guildId: string };
 
 // A small, hardcoded emoji set for the composer's quick-insert picker —
 // intentionally not a full emoji library (no new dependency), just the
@@ -306,6 +311,12 @@ export function ChatApp({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialCategory, setSettingsInitialCategory] =
     useState<import("@/lib/settings-context").CategoryId>("account");
+  const [guilds, setGuilds] = useState<Guild[]>([]);
+  const [createJoinOpen, setCreateJoinOpen] = useState(false);
+  const [guildSettingsOpen, setGuildSettingsOpen] = useState(false);
+  const [guildSettingsInitialTab, setGuildSettingsInitialTab] = useState<
+    "general" | "roles" | "members" | "invites"
+  >("general");
   const [dmFilter, setDmFilter] = useState("");
   // Which DM(s) currently have the other person actively typing. Cleared a
   // few seconds after the last "typing" event for that DM — see the
@@ -380,6 +391,16 @@ export function ChatApp({
     }
   }, [getToken]);
 
+  const refreshGuilds = useCallback(async () => {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      setGuilds(await listGuilds(token));
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Failed to load servers");
+    }
+  }, [getToken]);
+
   useEffect(() => {
     // Everything that touches state lives inside this one async IIFE and is
     // awaited, rather than firing refreshFriends()/refreshDms() directly in
@@ -400,7 +421,7 @@ export function ChatApp({
             : "Backend sync issue — is the auth-service running?",
         );
       }
-      await Promise.all([refreshFriends(), refreshDms()]);
+      await Promise.all([refreshFriends(), refreshDms(), refreshGuilds()]);
       setInitialLoading(false);
     })();
     // Runs once on mount — refreshFriends/refreshDms are stable-enough
@@ -632,6 +653,11 @@ export function ChatApp({
     setMobileShowDetail(true);
   }
 
+  function openGuildView(guildId: string) {
+    setView({ kind: "guild", guildId });
+    setMobileShowDetail(true);
+  }
+
   async function handleOpenDm(friendUserId: string) {
     const token = await getToken();
     if (!token) return;
@@ -742,6 +768,15 @@ export function ChatApp({
             </span>
           )}
         </button>
+
+        <GuildRail
+          guilds={guilds}
+          activeGuildId={view.kind === "guild" ? view.guildId : null}
+          compact={settings.compactSidebarIcons}
+          onSelectGuild={openGuildView}
+          onOpenCreateJoin={() => setCreateJoinOpen(true)}
+        />
+
         <div className="mt-auto flex flex-col items-center gap-1">
           {settings.showSignalDot && <SignalDot connected={connected} />}
           <span className="font-mono text-[8px] uppercase tracking-[0.15em] text-[#8B93A1]/60">
@@ -753,7 +788,10 @@ export function ChatApp({
       {/* sidebar — the nav/list panel. On mobile this *is* the home screen;
           it yields the full viewport to the detail panel once something is
           open (mobileShowDetail), and comes back via each header's back
-          button. From md up, both panels are always visible together. */}
+          button. From md up, both panels are always visible together.
+          Hidden entirely in guild mode — guild-view.tsx renders its own
+          channel sidebar in its place. */}
+      {view.kind !== "guild" && (
       <div
         className={`noschat-grain w-full flex-none flex-col border-r border-[#1D2129] bg-[#12151B] md:flex ${
           settings.sidebarWidth === "compact"
@@ -927,10 +965,27 @@ export function ChatApp({
           </Button>
         </div>
       </div>
+      )}
 
 
       {/* main — the detail panel. Full-screen on mobile once something's
-          open; permanently visible alongside the sidebar from md up. */}
+          open; permanently visible alongside the sidebar from md up. In
+          guild mode, guild-view.tsx owns the whole area including its own
+          channel sidebar, so this becomes a plain flex-1 wrapper. */}
+      {view.kind === "guild" ? (
+        <GuildView
+          guildId={view.guildId}
+          myId={myId}
+          onOpenSettings={() => {
+            setGuildSettingsInitialTab("general");
+            setGuildSettingsOpen(true);
+          }}
+          onOpenInvite={() => {
+            setGuildSettingsInitialTab("invites");
+            setGuildSettingsOpen(true);
+          }}
+        />
+      ) : (
       <div
         className={`relative min-w-0 flex-1 flex-col bg-[#161A20] md:flex ${mobileShowDetail ? "flex" : "hidden md:flex"}`}
       >
@@ -1363,6 +1418,30 @@ export function ChatApp({
           </>
         )}
       </div>
+      )}
+
+      <CreateJoinGuildModal
+        open={createJoinOpen}
+        onClose={() => setCreateJoinOpen(false)}
+        onCreated={(guild) => {
+          void refreshGuilds();
+          openGuildView(guild.id);
+        }}
+        onJoined={(guildId) => {
+          void refreshGuilds();
+          openGuildView(guildId);
+        }}
+      />
+
+      {view.kind === "guild" && (
+        <GuildSettingsModal
+          open={guildSettingsOpen}
+          onClose={() => setGuildSettingsOpen(false)}
+          guildId={view.guildId}
+          initialTab={guildSettingsInitialTab}
+          onGuildUpdated={refreshGuilds}
+        />
+      )}
 
       <SettingsPanel
         open={settingsOpen}

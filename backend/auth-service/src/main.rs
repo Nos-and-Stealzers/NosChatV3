@@ -1,6 +1,7 @@
 mod clerk;
 mod dms;
 mod friends;
+mod guilds;
 mod routes;
 mod sounds;
 mod webhooks;
@@ -159,6 +160,34 @@ async fn main() -> anyhow::Result<()> {
         .route("/dms", get(dms::list_dms).post(dms::open_dm))
         .route("/dms/{id}/messages", get(dms::list_messages).post(dms::send_message))
         .route("/dms/{id}/read", post(dms::mark_read))
+        .route("/guilds", get(guilds::list_guilds).post(guilds::create_guild))
+        .route("/guilds/{id}", get(guilds::get_guild).patch(guilds::update_guild).delete(guilds::delete_guild))
+        .route("/guilds/{id}/leave", post(guilds::leave_guild))
+        .route("/guilds/{id}/members", get(guilds::list_members))
+        .route("/guilds/{id}/members/{user_id}", axum::routing::delete(guilds::kick_member))
+        .route(
+            "/guilds/{id}/members/{user_id}/roles/{role_id}",
+            put(guilds::assign_role).delete(guilds::unassign_role),
+        )
+        .route("/guilds/{id}/channels", post(guilds::create_channel))
+        .route(
+            "/guilds/{id}/channels/{channel_id}",
+            axum::routing::patch(guilds::update_channel).delete(guilds::delete_channel),
+        )
+        .route(
+            "/guilds/{id}/channels/{channel_id}/messages",
+            get(guilds::list_channel_messages).post(guilds::send_channel_message),
+        )
+        .route("/guilds/{id}/categories", post(guilds::create_category))
+        .route("/guilds/{id}/roles", get(guilds::list_roles).post(guilds::create_role))
+        .route(
+            "/guilds/{id}/roles/{role_id}",
+            axum::routing::patch(guilds::update_role).delete(guilds::delete_role),
+        )
+        .route("/guilds/{id}/invites", get(guilds::list_invites).post(guilds::create_invite))
+        .route("/guilds/{id}/invites/{code}", axum::routing::delete(guilds::revoke_invite))
+        .route("/invites/{code}", get(guilds::preview_invite))
+        .route("/invites/{code}/accept", post(guilds::accept_invite))
         .route("/me/sounds", get(sounds::get_sounds))
         .route("/me/sounds/{slot}/preset", put(sounds::set_preset))
         .route("/me/sounds/{slot}/upload", post(sounds::upload_custom))

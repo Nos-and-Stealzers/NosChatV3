@@ -32,7 +32,39 @@ export type RealtimeEvent =
       candidate: RTCIceCandidateInit;
     }
   | { type: "call_end"; dm_id: string; from: string }
-  | { type: "call_reject"; dm_id: string; from: string };
+  | { type: "call_reject"; dm_id: string; from: string }
+  // --- Guild (server) text messages + voice presence/signaling ----------
+  // Mirrors the DM `message` event but scoped to a guild text channel.
+  | {
+      type: "guild_message";
+      guild_id: string;
+      channel_id: string;
+      message: import("@/lib/backend-api").GuildMessage;
+    }
+  // Sent to a client right after it joins a voice channel — the full
+  // roster of who's already connected, so it can open a peer connection to
+  // each of them (mesh topology, see voice-context.tsx).
+  | { type: "voice_channel_state"; channel_id: string; user_ids: string[] }
+  | { type: "voice_user_joined"; channel_id: string; user_id: string }
+  | { type: "voice_user_left"; channel_id: string; user_id: string }
+  | {
+      type: "voice_offer";
+      channel_id: string;
+      from: string;
+      sdp: RTCSessionDescriptionInit;
+    }
+  | {
+      type: "voice_answer";
+      channel_id: string;
+      from: string;
+      sdp: RTCSessionDescriptionInit;
+    }
+  | {
+      type: "voice_ice_candidate";
+      channel_id: string;
+      from: string;
+      candidate: RTCIceCandidateInit;
+    };
 
 // Client->server call-signaling shapes sendCallSignal accepts — mirrors the
 // backend's ClientEvent enum in ws.rs (minus Typing, which keeps its own
@@ -44,6 +76,21 @@ export type CallSignal =
   | { type: "call_ice_candidate"; dm_id: string; candidate: RTCIceCandidateInit }
   | { type: "call_end"; dm_id: string }
   | { type: "call_reject"; dm_id: string };
+
+// Client->server voice-channel signaling shapes sendGuildSignal accepts —
+// mirrors the backend's ClientEvent enum's voice_* variants. Same
+// fire-and-forget, no-retry-queue pattern as sendCallSignal.
+export type GuildVoiceSignal =
+  | { type: "voice_join"; channel_id: string }
+  | { type: "voice_leave"; channel_id: string }
+  | { type: "voice_offer"; channel_id: string; to: string; sdp: RTCSessionDescriptionInit }
+  | { type: "voice_answer"; channel_id: string; to: string; sdp: RTCSessionDescriptionInit }
+  | {
+      type: "voice_ice_candidate";
+      channel_id: string;
+      to: string;
+      candidate: RTCIceCandidateInit;
+    };
 
 type Listener = (event: RealtimeEvent) => void;
 
@@ -62,6 +109,10 @@ type RealtimeContextValue = {
   // open — call-context.tsx is responsible for treating that as a hard
   // failure (there's no retry queue here, same as sendTyping).
   sendCallSignal: (signal: CallSignal) => void;
+  // Fire-and-forget: sends any guild voice-channel signaling event
+  // (join/leave/offer/answer/ICE) up the same socket. Same no-op-if-closed
+  // semantics as sendCallSignal/sendTyping.
+  sendGuildSignal: (signal: GuildVoiceSignal) => void;
   // --- Developer-settings-gated debug surface --------------------------
   // Real state pulled straight from the live socket, exposed for the
   // Settings panel's WebSocket debug overlay (Developer category).
@@ -120,6 +171,13 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const sendCallSignal = useCallback((signal: CallSignal) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(signal));
+    }
+  }, []);
+
+  const sendGuildSignal = useCallback((signal: GuildVoiceSignal) => {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(signal));
@@ -196,6 +254,7 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
         connected,
         sendTyping,
         sendCallSignal,
+        sendGuildSignal,
         reconnectCount,
         lastEventType,
         lastEventAt,
