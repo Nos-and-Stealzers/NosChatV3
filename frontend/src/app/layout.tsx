@@ -24,6 +24,9 @@ const instrumentSerif = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_APP_URL || "https://noschatv2.noslab.fun",
+  ),
   title: "NosChat — self-hosted chat",
   description:
     "A self-hosted chat platform. Clerk handles sign-in/sign-up; everything else — data, files, realtime — lives on your homelab.",

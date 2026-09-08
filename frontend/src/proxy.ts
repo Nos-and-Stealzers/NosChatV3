@@ -12,6 +12,13 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 const isPublicRoute = createRouteMatcher([
   "/sign-in(.*)",
   "/sign-up(.*)",
+  // Next.js file-convention icon/OG routes (icon.tsx, apple-icon.tsx) are
+  // fetched directly by browsers/crawlers with no session — must stay
+  // public or every favicon/link-preview request 307s to /sign-in instead
+  // of returning an image.
+  "/icon",
+  "/apple-icon",
+  "/opengraph-image",
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
