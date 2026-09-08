@@ -2,6 +2,7 @@ mod clerk;
 mod dms;
 mod friends;
 mod guilds;
+mod profiles;
 mod routes;
 mod sounds;
 mod webhooks;
@@ -189,6 +190,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/guilds/{id}/invites/{code}", axum::routing::delete(guilds::revoke_invite))
         .route("/invites/{code}", get(guilds::preview_invite))
         .route("/invites/{code}/accept", post(guilds::accept_invite))
+        .route("/me/profile", get(profiles::get_own_profile).patch(profiles::update_profile))
+        .route("/me/presence", put(profiles::set_presence))
+        .route("/users/{id}", get(profiles::get_public_profile))
         .route("/me/sounds", get(sounds::get_sounds))
         .route("/me/sounds/{slot}/preset", put(sounds::set_preset))
         .route("/me/sounds/{slot}/upload", post(sounds::upload_custom))

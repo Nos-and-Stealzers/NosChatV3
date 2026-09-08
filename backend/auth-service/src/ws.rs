@@ -119,6 +119,14 @@ impl WsHub {
         let conns = self.connections.read().await;
         conns.values().map(|v| v.len()).sum()
     }
+
+    /// Whether `user_id` has at least one live WebSocket connection right
+    /// now — the ground truth for "online" that `profiles::effective_status`
+    /// layers the user's chosen presence_mode on top of.
+    pub async fn is_online(&self, user_id: Uuid) -> bool {
+        let conns = self.connections.read().await;
+        conns.get(&user_id).map(|v| !v.is_empty()).unwrap_or(false)
+    }
 }
 
 #[derive(Deserialize)]
@@ -402,11 +410,33 @@ pub async fn ws_upgrade(
     ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
 }
 
+/// Looks up the stored presence_mode + status_text for `user_id`, defaulting
+/// to "online" if the row can't be read for some reason (fail open on the
+/// broadcast, not on the connection itself).
+async fn stored_presence(state: &AppState, user_id: Uuid) -> (String, Option<String>) {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT presence_mode, status_text FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+    row.unwrap_or_else(|| ("online".to_string(), None))
+}
+
 async fn handle_socket(socket: WebSocket, state: AppState, user_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.ws_hub.register(user_id).await;
 
     tracing::info!("ws connected: user {user_id}");
+
+    // Real presence just changed (offline -> online, modulo invisible) —
+    // tell friends. Runs after `register` so `is_online`/`effective_status`
+    // already reflects this connection.
+    {
+        let (mode, status_text) = stored_presence(&state, user_id).await;
+        let status = if mode == "invisible" { "offline".to_string() } else { mode };
+        crate::profiles::broadcast_presence(&state, user_id, &status, status_text).await;
+    }
 
     let mut send_task = tokio::spawn(async move {
         while let Some(payload) = rx.recv().await {
@@ -454,6 +484,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: Uuid) {
             "user_id": user_id,
         });
         state.ws_hub.send_to_many(&remaining, payload).await;
+    }
+
+    // Real presence just changed (possibly online -> offline, if that was
+    // this user's last live connection) — tell friends the up-to-date
+    // effective status.
+    {
+        let (mode, status_text) = stored_presence(&state, user_id).await;
+        let status = crate::profiles::effective_status_pub(&state, user_id, &mode).await;
+        crate::profiles::broadcast_presence(&state, user_id, &status, status_text).await;
     }
 
     tracing::info!("ws disconnected: user {user_id}");
