@@ -140,6 +140,19 @@ pub async fn get_or_create_local_user(
         )
     })?;
 
+    // Every brand-new user automatically lands in the shared default
+    // community server (created on first-ever use if it doesn't exist
+    // yet) with a real starter channel layout — matching how most
+    // Discord-alike communities have one "town square" everyone's in from
+    // the start, instead of a new signup starting with zero servers and
+    // an empty friends list. Best-effort: a failure here shouldn't block
+    // sign-in itself (the user's own row above already committed
+    // successfully), just log it so it's visible without silently eating
+    // real errors.
+    if let Err(e) = crate::guilds::auto_join_default_guild(state, user.id).await {
+        tracing::error!("failed to auto-join {} to the default community: {e:#}", user.id);
+    }
+
     Ok(user)
 }
 

@@ -265,6 +265,168 @@ pub struct CreateGuildBody {
     pub name: String,
 }
 
+/// The name/icon color for the auto-created default community server —
+/// the one every new user is joined to automatically. Not user-editable
+/// (MANAGE_GUILD still works on it like any guild, but nothing here
+/// hardcodes it as immutable — an owner/admin can rename it same as any
+/// server; this is just the seed values used the one time it's created).
+const DEFAULT_COMMUNITY_NAME: &str = "NosChat Community";
+const DEFAULT_COMMUNITY_ICON: &str = "#5FD9C4";
+
+/// Idempotently returns the id of the single shared default-community
+/// guild, creating it (with a starter category + a handful of text/voice
+/// channels) the first time it's needed. Safe under concurrent callers:
+/// the partial unique index on `is_default_community` means a race
+/// between two simultaneous first-ever signups can only successfully
+/// INSERT once — the loser's insert hits the unique constraint and this
+/// function just re-queries to pick up the winner's row instead of
+/// erroring.
+///
+/// `founding_user_id` becomes `owner_id` only if this call is the one
+/// that actually creates the guild (i.e. whoever triggers creation, which
+/// in practice is simply whichever new user signs up first ever). Every
+/// other guild in the schema requires a real owner_id (NOT NULL FK), so a
+/// "belongs to everyone" system guild still needs *a* nominal owner —
+/// ownership carries no special end-user-visible meaning here since
+/// MANAGE_GUILD is what actually gates administration, and staff (see
+/// routes.rs's is_dev_staff_email) can always manage any guild regardless
+/// of who nominally owns it.
+async fn get_or_create_default_guild(state: &AppState, founding_user_id: Uuid) -> Result<Uuid, sqlx::Error> {
+    if let Some((id,)) = sqlx::query_as::<_, (Uuid,)>(
+        "SELECT id FROM guilds WHERE is_default_community = true",
+    )
+    .fetch_optional(&state.db)
+    .await?
+    {
+        return Ok(id);
+    }
+
+    let mut tx = state.db.begin().await?;
+
+    let insert_result: Result<(Uuid,), sqlx::Error> = sqlx::query_as(
+        "INSERT INTO guilds (name, icon_color, owner_id, is_default_community)
+         VALUES ($1, $2, $3, true) RETURNING id",
+    )
+    .bind(DEFAULT_COMMUNITY_NAME)
+    .bind(DEFAULT_COMMUNITY_ICON)
+    .bind(founding_user_id)
+    .fetch_one(&mut *tx)
+    .await;
+
+    let guild_id = match insert_result {
+        Ok((id,)) => id,
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            // Lost the creation race to a concurrent signup — fine, just
+            // read back whichever guild won.
+            tx.rollback().await.ok();
+            let (id,): (Uuid,) = sqlx::query_as(
+                "SELECT id FROM guilds WHERE is_default_community = true",
+            )
+            .fetch_one(&state.db)
+            .await?;
+            return Ok(id);
+        }
+        Err(e) => return Err(e),
+    };
+
+    let default_perms = PERM_VIEW_CHANNELS | PERM_SEND_MESSAGES | PERM_CONNECT | PERM_SPEAK;
+    sqlx::query(
+        "INSERT INTO guild_roles (guild_id, name, position, permissions, is_default)
+         VALUES ($1, '@everyone', 0, $2, true)",
+    )
+    .bind(guild_id)
+    .bind(default_perms)
+    .execute(&mut *tx)
+    .await?;
+
+    let (welcome_category_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO channel_categories (guild_id, name, position) VALUES ($1, 'WELCOME', 0) RETURNING id",
+    )
+    .bind(guild_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let (community_category_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO channel_categories (guild_id, name, position) VALUES ($1, 'COMMUNITY', 1) RETURNING id",
+    )
+    .bind(guild_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // A small real starter layout — not just one bare "general" channel,
+    // so a brand new install feels like an actual populated community
+    // from the very first signup instead of an empty room. Every
+    // signed-up user lands here automatically (see auto_join_default_guild),
+    // so this is the one guild guaranteed to always have members.
+    let channels: &[(Uuid, &str, &str, i32)] = &[
+        (welcome_category_id, "welcome", "text", 0),
+        (welcome_category_id, "rules", "text", 1),
+        (welcome_category_id, "announcements", "text", 2),
+        (community_category_id, "general", "text", 0),
+        (community_category_id, "off-topic", "text", 1),
+        (community_category_id, "General Voice", "voice", 2),
+        (community_category_id, "Music", "voice", 3),
+    ];
+    for (category_id, name, kind, position) in channels {
+        sqlx::query(
+            "INSERT INTO guild_channels (guild_id, category_id, name, kind, position) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(guild_id)
+        .bind(category_id)
+        .bind(name)
+        .bind(kind)
+        .bind(position)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(guild_id)
+}
+
+/// Joins `user_id` to the shared default-community guild if they aren't
+/// already a member — called from routes.rs's get_or_create_local_user
+/// the moment a brand new user row is created, so every real signup lands
+/// in a populated server automatically instead of starting with an empty
+/// friends list and no servers at all.
+pub async fn auto_join_default_guild(state: &AppState, user_id: Uuid) -> Result<(), sqlx::Error> {
+    let guild_id = get_or_create_default_guild(state, user_id).await?;
+
+    let already_member: Option<(Uuid,)> =
+        sqlx::query_as("SELECT guild_id FROM guild_members WHERE guild_id = $1 AND user_id = $2")
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if already_member.is_some() {
+        return Ok(());
+    }
+
+    sqlx::query("INSERT INTO guild_members (guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+
+    let default_role: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM guild_roles WHERE guild_id = $1 AND is_default = true")
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some((role_id,)) = default_role {
+        sqlx::query(
+            "INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(role_id)
+        .execute(&state.db)
+        .await?;
+    }
+
+    Ok(())
+}
+
 /// `POST /guilds` — creates a guild, an `@everyone` role, a default
 /// `general` text channel and `General` voice channel, and makes the
 /// caller the owner + first member.
