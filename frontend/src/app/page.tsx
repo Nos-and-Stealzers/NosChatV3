@@ -12,7 +12,7 @@ export default async function Home() {
   const { userId } = await auth();
   const user = await currentUser();
   if (!userId || !user) {
-    redirect("/login");
+    redirect("/sign-in");
   }
 
   const displayName = user.firstName ?? user.username ?? "there";

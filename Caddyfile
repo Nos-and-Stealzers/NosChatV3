@@ -1,0 +1,20 @@
+# Caddyfile — automatic HTTPS reverse proxy for the NosChatV3 backend.
+#
+# Replace "your-domain.example.com" with your real domain. That domain's
+# DNS A record must point at this machine's public IP before Caddy can
+# obtain a certificate (Caddy uses Let's Encrypt / ZeroSSL automatically —
+# no manual cert setup needed).
+#
+# If you also want to self-host the built Next.js frontend from this same
+# box instead of deploying it to Vercel, uncomment the second site block
+# below and run `npm run build && npm start` for the frontend as an
+# additional container (or process) on this host, then point Caddy at it.
+
+your-domain.example.com {
+	reverse_proxy backend:4000
+}
+
+# Optional: self-hosted frontend on a subdomain, instead of Vercel.
+# app.your-domain.example.com {
+# 	reverse_proxy frontend:3000
+# }

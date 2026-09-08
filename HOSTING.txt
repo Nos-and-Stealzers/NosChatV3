@@ -1,0 +1,286 @@
+NOSCHATV3 — SELF-HOSTING GUIDE
+================================
+Plain-language, step-by-step. Written for someone who has never touched
+this repo before. If you get stuck, the CLAUDE.md file in the repo root
+has deeper technical history/context.
+
+
+SECTION 1 — LOCAL DEV SETUP (one developer machine, for coding/testing)
+-------------------------------------------------------------------------
+This is what you use day-to-day while writing code. Nothing here is
+exposed to the internet.
+
+1. Start Postgres + Redis (dev containers):
+     docker compose up -d
+   This uses the existing docker-compose.yml at repo root. Postgres will
+   be reachable on host port 5433 (not 5432 — see the comment in that
+   file if you're curious why), Redis on 6379.
+
+2. Start the backend:
+     cd backend/auth-service
+     copy .env.example to .env and fill in real values (see Section 5
+     below for what each variable means)
+     cd back to repo root, then: cargo run --bin auth-service
+   (binds to 0.0.0.0:4000, auto-runs any pending DB migrations on startup)
+
+   WINDOWS-SPECIFIC QUIRK: plain `cargo build` / `cargo run` can fail on
+   Windows because git-bash's own link.exe shadows MSVC's link.exe on the
+   PATH, breaking the default MSVC toolchain build. If you hit weird
+   linker errors, use the provided build-backend.bat instead, run from
+   cmd.exe (not git-bash):
+     cmd.exe /c build-backend.bat
+   This builds against the GNU (mingw) Rust toolchain instead, which
+   sidesteps the conflict entirely. Once built, the resulting binary is
+   under backend\target\x86_64-pc-windows-gnu\debug\auth-service.exe and
+   can be run directly. Non-Windows machines / real CI don't have this
+   problem and can use plain `cargo run`.
+
+3. Start the frontend:
+     cd frontend
+     copy .env.local.example to .env.local and fill in real values
+     npm run dev
+   Visit http://localhost:3100 (or whatever port your dev server reports
+   — a system-wide PORT env var can override Next's default 3000 on some
+   machines; the repo's package.json pins -p 3100 to avoid that).
+
+4. Sign up / sign in via /sign-in and /sign-up (Clerk's hosted UI,
+   themed to match the app). These are the ONLY auth routes in the app —
+   an earlier /login + /register duplicate pair was removed.
+
+
+SECTION 2 — FULL LOCAL SELF-HOST (single machine / homelab box)
+-------------------------------------------------------------------------
+This runs everything as containers on one machine you control (e.g. a
+homelab server), with a real domain and automatic HTTPS via Caddy. This
+is the "everything except Clerk stays on hardware I own" setup.
+
+What you need first:
+  - A machine that's always on, with Docker installed.
+  - A domain name (or subdomain) you control, e.g. api.yourdomain.com.
+  - That domain's DNS A record pointed at this machine's public IP.
+  - Port 80 and 443 forwarded from your router to this machine (if it's
+    behind a home router / NAT — a cloud VPS usually doesn't need this
+    step, see Section 3).
+
+Steps:
+1. Copy backend/auth-service/.env.example to backend/auth-service/.env
+   and fill in CLERK_JWKS_URL and CLERK_WEBHOOK_SECRET (see Section 5).
+   You do NOT need to set DATABASE_URL/REDIS_URL here — the compose file
+   below sets those automatically to point at the container network.
+
+2. Edit the Caddyfile at repo root: replace "your-domain.example.com"
+   with your real domain.
+
+3. Set a real Postgres password (don't use the default placeholder):
+     export POSTGRES_PASSWORD=some-long-random-password
+   (or put it in a .env file at repo root next to docker-compose.prod.yml
+   — Docker Compose reads root-level .env automatically for variable
+   substitution like ${POSTGRES_PASSWORD}).
+
+4. Build and start everything:
+     docker compose -f docker-compose.prod.yml up -d --build
+   This builds the backend's Docker image (multi-stage Rust build, see
+   backend/auth-service/Dockerfile), then starts Postgres, Redis, the
+   backend, and Caddy. Caddy automatically requests and renews a real
+   TLS certificate for your domain the first time it starts — this
+   requires the domain to already be pointed at this machine and ports
+   80/443 to be reachable from the internet (Let's Encrypt validates
+   ownership over HTTP).
+
+5. Check it's working:
+     docker compose -f docker-compose.prod.yml logs -f
+     curl https://your-domain.example.com/health
+   Expect {"status":"ok","service":"auth-service","db":true}.
+
+6. Frontend: you have two choices —
+   a) Deploy the frontend to Vercel (see Section 4) and point its
+      NEXT_PUBLIC_AUTH_SERVICE_URL / NEXT_PUBLIC_AUTH_SERVICE_WS_URL at
+      this homelab's public domain (https://your-domain.example.com and
+      wss://your-domain.example.com/ws). This is the setup this project
+      was originally designed around: Vercel frontend + homelab backend.
+   b) OR self-host the frontend too, on this same box. Uncomment the
+      second site block in the Caddyfile, add a "frontend" service to
+      docker-compose.prod.yml that runs `npm run build && npm start`
+      from the frontend/ directory (a Dockerfile for the frontend isn't
+      included yet — this repo currently assumes Vercel for the
+      frontend; add one following the same multi-stage pattern as
+      backend/auth-service/Dockerfile if you want this route).
+
+Only ports 80 and 443 need to be reachable from outside this machine.
+Postgres, Redis, and the backend itself are only reachable from other
+containers on the internal Docker network (see the "internal" network
+in docker-compose.prod.yml) — this is deliberate, don't add "ports:"
+mappings to them.
+
+
+SECTION 3 — CLOUD / VPS HOSTING (DigitalOcean, Hetzner, etc.)
+-------------------------------------------------------------------------
+Exactly the same docker-compose.prod.yml and Dockerfile work unchanged on
+any VPS — a homelab box and a cloud VPS are identical from Docker's point
+of view. Differences that actually matter:
+
+  - Firewall: only open 80 and 443 to the public internet (most VPS
+    providers default to a security-group/firewall UI — allow inbound
+    TCP 80 and 443 only; SSH (22) too if you need remote access, ideally
+    locked to your own IP). Do NOT expose 5432/6379/4000 publicly.
+  - DNS: point your domain's A record at the VPS's public IP (no router
+    port-forwarding needed — the VPS already has a public IP directly).
+  - Everything else (steps 1–6 in Section 2) is identical: clone the
+    repo, fill in .env, edit the Caddyfile, `docker compose -f
+    docker-compose.prod.yml up -d --build`.
+
+
+SECTION 4 — FRONTEND HOSTING (Vercel, recommended)
+-------------------------------------------------------------------------
+1. Push this repo to GitHub (or GitLab/self-hosted git — Vercel supports
+   all three).
+2. In Vercel: New Project -> import the repo -> set the "Root Directory"
+   to `frontend` (since this is a monorepo).
+3. Add these environment variables in the Vercel project settings
+   (Project -> Settings -> Environment Variables):
+     NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY   (from Clerk dashboard)
+     CLERK_SECRET_KEY                    (from Clerk dashboard, mark as
+                                          a "Secret", never expose client-side)
+     NEXT_PUBLIC_CLERK_SIGN_IN_URL       = /sign-in
+     NEXT_PUBLIC_CLERK_SIGN_UP_URL       = /sign-up
+     NEXT_PUBLIC_AUTH_SERVICE_URL        = https://your-domain.example.com
+     NEXT_PUBLIC_AUTH_SERVICE_WS_URL     = wss://your-domain.example.com/ws
+   (the last two point at wherever your backend ends up — homelab or VPS,
+   from Sections 2/3 above)
+4. Deploy. Vercel runs `npm run build` automatically.
+5. Once live, set up the Clerk webhook (see Section 5's note on
+   CLERK_WEBHOOK_SECRET) pointing at
+   https://your-domain.example.com/webhooks/clerk (your backend's public
+   URL, not Vercel's).
+
+Alternative: self-host the frontend too, in the same docker-compose.prod.yml
+stack (see Section 2, step 6b) with `npm run build && npm start` instead of
+using Vercel at all. Vercel is recommended because it's free for small
+projects and handles CDN/edge caching for you, but it's not required.
+
+
+SECTION 5 — REQUIRED ENVIRONMENT VARIABLES (full checklist)
+-------------------------------------------------------------------------
+Backend (backend/auth-service/.env, see .env.example for the annotated
+version):
+
+  DATABASE_URL
+      Postgres connection string. Local dev: points at host port 5433.
+      docker-compose.prod.yml sets this automatically to the internal
+      "postgres" container hostname — you don't need to set it yourself
+      in that path.
+
+  REDIS_URL
+      Currently unused by the backend (no Redis-backed feature is wired
+      up yet) but included so the compose files / .env shape stay
+      consistent for when it is used later (e.g. WS fanout across
+      multiple backend instances).
+
+  CLERK_JWKS_URL
+      Clerk's public key endpoint for verifying session JWTs. Get it
+      from: Clerk dashboard -> API Keys -> "Show JWKS URL", or construct
+      it as https://<your-instance>.clerk.accounts.dev/.well-known/jwks.json
+      Required for any Clerk-protected route (/me, etc.) to work at all.
+
+  CLERK_WEBHOOK_SECRET
+      Signing secret Clerk uses to sign webhook deliveries to
+      /webhooks/clerk, so this backend can verify a request genuinely
+      came from Clerk (via Svix). Get it from: Clerk dashboard -> your
+      app -> Webhooks -> Add Endpoint (URL: https://<your-backend>/webhooks/clerk,
+      events: user.created, user.updated, user.deleted) -> copy the
+      "Signing Secret" (starts with whsec_).
+      Alternative for local dev, no public URL needed: install the Clerk
+      CLI (npm install -g clerk), then run:
+        clerk webhooks listen --forward-to http://localhost:4000/webhooks/clerk
+      which prints a signing secret you can use instead of a dashboard
+      endpoint.
+      IMPORTANT: if you leave this unset (or at the whsec_changeme
+      placeholder), the app still works end-to-end — signing in/up still
+      succeeds because GET /me creates the local user row on the fly
+      from the verified JWT the first time it's needed. You only lose
+      webhook-driven updates (username/email changes propagating from
+      Clerk, account deletion propagating from Clerk) until this is set.
+      The backend prints a loud, actionable warning at startup if this
+      is missing, with both setup options spelled out.
+
+Frontend (frontend/.env.local, see .env.local.example for the annotated
+version):
+
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+      Clerk dashboard -> API Keys -> Publishable key. Safe to expose
+      client-side (it's public by design).
+
+  CLERK_SECRET_KEY
+      Clerk dashboard -> API Keys -> Secret key. NEVER expose this
+      client-side or commit it — server-side only.
+
+  NEXT_PUBLIC_CLERK_SIGN_IN_URL / NEXT_PUBLIC_CLERK_SIGN_UP_URL
+      Must be /sign-in and /sign-up respectively — these are the only
+      canonical auth routes in the app (see src/app/(auth)/sign-in and
+      src/app/(auth)/sign-up).
+
+  NEXT_PUBLIC_AUTH_SERVICE_URL
+      Wherever the Rust backend is reachable: http://localhost:4000 for
+      local dev, https://your-domain.example.com once it's deployed
+      (homelab or VPS, behind Caddy).
+
+  NEXT_PUBLIC_AUTH_SERVICE_WS_URL
+      Same backend, WebSocket scheme: ws://localhost:4000/ws locally,
+      wss://your-domain.example.com/ws in production.
+
+
+SECTION 6 — FIRST-TIME SETUP CHECKLIST (for a friend with zero context)
+-------------------------------------------------------------------------
+[ ] Install: Docker Desktop (or Docker Engine on Linux), Rust
+    (rustup.rs), Node.js 20+, git.
+[ ] Clone this repo.
+[ ] Create a free Clerk account at clerk.com, create a new application.
+[ ] From Clerk's dashboard, copy your Publishable Key and Secret Key.
+[ ] cd frontend, copy .env.local.example to .env.local, paste in your
+    Clerk keys, leave NEXT_PUBLIC_AUTH_SERVICE_URL as the localhost
+    default for now.
+[ ] cd backend/auth-service, copy .env.example to .env. Get your
+    CLERK_JWKS_URL from the Clerk dashboard's API Keys page (leave
+    CLERK_WEBHOOK_SECRET as the placeholder for now — it's not required
+    to get sign-in working, see Section 5).
+[ ] From repo root: docker compose up -d  (starts Postgres + Redis)
+[ ] From backend/: cargo run --bin auth-service (or, on Windows, if you
+    hit linker errors: cmd.exe /c build-backend.bat, then run the built
+    .exe directly)
+[ ] From frontend/: npm run dev
+[ ] Open the frontend URL it prints, click Sign Up, create an account.
+    You should land on the app's main page — this proves Clerk auth +
+    the backend's lazy user-sync are both working.
+[ ] (Optional, later) When ready to go live: get a domain, follow
+    Section 2 or 3 to stand up the backend for real, then Section 4 to
+    deploy the frontend to Vercel pointing at it.
+[ ] (Optional, later) Wire up a real CLERK_WEBHOOK_SECRET per Section 5
+    once your backend has a public URL, so username/email changes and
+    account deletions sync automatically instead of relying only on the
+    lazy-create fallback.
+
+
+WHAT'S BEEN ACTUALLY TESTED VS. NOT (be honest with yourself here too)
+-------------------------------------------------------------------------
+Tested for real on this machine:
+  - Backend compiles cleanly (build-backend.bat / cargo build).
+  - Frontend builds cleanly (npm run build), including after removing
+    the duplicate /login + /register routes.
+  - docker-compose.prod.yml and docker-compose.yml both parse as valid
+    YAML with the expected service names.
+
+NOT tested (no Docker installed on this dev machine, and no real domain
+available to this session):
+  - Actually building the backend's Docker image (docker build) or
+    running `docker compose -f docker-compose.prod.yml up`.
+  - Caddy's automatic HTTPS/Let's Encrypt flow (needs a real public
+    domain + open ports 80/443 to validate).
+  - A live end-to-end webhook delivery from Clerk (needs either a public
+    URL or the `clerk webhooks listen` CLI relay, both of which need
+    live interaction with Clerk's services).
+If you have Docker available, the recommended sanity check before a real
+deploy is:
+    docker compose -f docker-compose.prod.yml config
+    docker compose -f docker-compose.prod.yml build backend
+both of which can be run without a real domain or exposing anything to
+the internet yet.

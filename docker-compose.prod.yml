@@ -1,0 +1,91 @@
+# Production / self-host stack: Postgres + Redis + the Rust backend, all as
+# containers, fronted by Caddy for automatic HTTPS. This is meant to run
+# on either a homelab box or any cloud VPS — same file, same commands.
+#
+# Usage:
+#   1. Copy backend/auth-service/.env.example to backend/auth-service/.env
+#      and fill in real values (DATABASE_URL host below is "postgres", the
+#      Docker service name, not localhost).
+#   2. Edit Caddyfile: replace "your-domain.example.com" with your real
+#      domain (must already have a DNS A record pointing at this host).
+#   3. docker compose -f docker-compose.prod.yml up -d --build
+#   4. Watch first-boot logs: docker compose -f docker-compose.prod.yml logs -f
+#
+# Only Caddy's ports (80/443) need to be reachable from the internet.
+# Postgres/Redis/the backend all stay on the internal Docker network.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: noschat-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: noschat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_set_a_real_password}
+      POSTGRES_DB: noschat
+    volumes:
+      - noschat_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U noschat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+    # No "ports:" mapping on purpose — only reachable from other containers
+    # on the internal network, never directly from the internet.
+
+  redis:
+    image: redis:7-alpine
+    container_name: noschat-redis
+    restart: unless-stopped
+    volumes:
+      - noschat_redis_data:/data
+    networks:
+      - internal
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/auth-service/Dockerfile
+    container_name: noschat-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://noschat:${POSTGRES_PASSWORD:-changeme_set_a_real_password}@postgres:5432/noschat
+      REDIS_URL: redis://redis:6379
+      CLERK_JWKS_URL: ${CLERK_JWKS_URL}
+      CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:-whsec_changeme}
+      RUST_LOG: info
+    networks:
+      - internal
+    # No "ports:" mapping — Caddy reverse-proxies to it over the internal
+    # network (see Caddyfile), so the backend is never directly internet-
+    # facing either.
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: noschat-caddy
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - noschat_caddy_data:/data
+      - noschat_caddy_config:/config
+    networks:
+      - internal
+
+networks:
+  internal:
+
+volumes:
+  noschat_postgres_data:
+  noschat_redis_data:
+  noschat_caddy_data:
+  noschat_caddy_config:

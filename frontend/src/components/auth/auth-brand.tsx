@@ -16,7 +16,7 @@ export function AuthFooterSignature() {
   return (
     <p className="mt-6 text-center font-mono text-[11px] tracking-wide text-[#8B93A1]">
       <span className="text-[#F0A868]">⦿</span> self-hosted — Clerk handles
-      sign-in, your homelab handles everything else
+      auth, your homelab handles everything else
     </p>
   );
 }

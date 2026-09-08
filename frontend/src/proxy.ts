@@ -3,19 +3,13 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 // Everything except the auth pages themselves (and Next internals/static
 // assets) requires a signed-in Clerk session. Add more public routes here
 // as they're built (e.g. a public landing page) — right now `/` just
-// redirects to `/login`, so there's no public page to exempt yet.
+// redirects to `/sign-in`, so there's no public page to exempt yet.
 //
-// Both /login+/register (the original Clerk pages) and /sign-in+/sign-up
-// (added later, and what NEXT_PUBLIC_CLERK_SIGN_IN_URL/SIGN_UP_URL in
-// frontend/.env.local actually point Clerk's unauthenticated redirect at)
-// are listed here — the previous version only listed /login+/register,
-// which meant an unauthenticated hit to /sign-in got protect()-ed, which
-// redirected back to /sign-in?redirect_url=..., which got protect()-ed
-// again, forever (ERR_TOO_MANY_REDIRECTS). Keeping both pairs public until
-// one pair is deliberately removed.
+// Canonical auth routes are /sign-in and /sign-up (Clerk's own default
+// routing convention). The earlier /login + /register pair was a
+// duplicate set from an earlier session and has been deleted — don't
+// re-add it here.
 const isPublicRoute = createRouteMatcher([
-  "/login(.*)",
-  "/register(.*)",
   "/sign-in(.*)",
   "/sign-up(.*)",
 ]);

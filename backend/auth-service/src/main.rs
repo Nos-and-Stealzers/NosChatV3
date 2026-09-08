@@ -61,11 +61,47 @@ async fn main() -> anyhow::Result<()> {
         String::new()
     });
 
-    let clerk_webhook_secret = std::env::var("CLERK_WEBHOOK_SECRET").ok();
+    // Placeholder detection: treat both "unset" and "still the example
+    // placeholder value" as unconfigured. A raw `whsec_changeme` slipping
+    // through from a copy-pasted .env is a very easy mistake to make and
+    // should be just as loud as leaving the var out entirely.
+    let clerk_webhook_secret = std::env::var("CLERK_WEBHOOK_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty() && s != "whsec_changeme");
     if clerk_webhook_secret.is_none() {
         tracing::warn!(
-            "CLERK_WEBHOOK_SECRET not set — /webhooks/clerk will reject everything with a 500 \
-             until this is set from the Clerk dashboard's webhook endpoint config."
+            "\n\
+            ============================================================\n\
+            CLERK_WEBHOOK_SECRET is not set (or is still the placeholder\n\
+            `whsec_changeme`). POST /webhooks/clerk will reject every\n\
+            request with 500 until this is fixed.\n\
+            \n\
+            This is NOT fatal for sign-in/sign-up: a lazy-sync fallback in\n\
+            GET /me (see routes.rs) will create the local `users` row on\n\
+            first authenticated request even if the webhook never fires.\n\
+            But webhook-driven updates/deletes (username changes, account\n\
+            deletion propagating from Clerk) will NOT sync until this is\n\
+            configured. To fix it, do ONE of:\n\
+            \n\
+            Option A — Clerk dashboard (needs a public URL):\n\
+              1. Deploy/tunnel this backend so it has a public HTTPS URL\n\
+                 (e.g. your homelab's domain, or a tunnel like ngrok/\n\
+                 cloudflared for local testing).\n\
+              2. Clerk dashboard -> your app -> Webhooks -> Add Endpoint.\n\
+              3. Endpoint URL: https://<your-public-url>/webhooks/clerk\n\
+              4. Subscribe to events: user.created, user.updated, user.deleted\n\
+              5. Copy the \"Signing Secret\" (starts with whsec_) into\n\
+                 CLERK_WEBHOOK_SECRET in backend/auth-service/.env\n\
+              6. Restart this service.\n\
+            \n\
+            Option B — Clerk CLI local relay (no public URL needed):\n\
+              1. npm install -g clerk   (if not already installed)\n\
+              2. clerk webhooks listen --forward-to http://localhost:4000/webhooks/clerk\n\
+              3. The CLI prints a signing secret — copy it into\n\
+                 CLERK_WEBHOOK_SECRET in backend/auth-service/.env\n\
+              4. Restart this service. Keep the `clerk webhooks listen`\n\
+                 process running while developing locally.\n\
+            ============================================================"
         );
     }
 
