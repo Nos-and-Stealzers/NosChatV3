@@ -18,6 +18,16 @@ import {
 
 type Tab = "create" | "join";
 
+// Tolerates a pasted full invite URL (e.g.
+// "https://noschat.example/invite/abc123") as well as a bare code —
+// extracts just the trailing path segment either way. Shared by both
+// the preview and join calls so a pasted URL works end-to-end, not just
+// for the preview step.
+function parseInviteCode(input: string): string {
+  const raw = input.trim();
+  return raw.includes("/") ? raw.split("/").filter(Boolean).pop()! : raw;
+}
+
 export function CreateJoinGuildModal({
   open,
   onClose,
@@ -90,7 +100,7 @@ export function CreateJoinGuildModal({
     try {
       const token = await getToken();
       if (!token) return;
-      const p = await previewInvite(token, code.trim());
+      const p = await previewInvite(token, parseInviteCode(code));
       setPreview(p);
     } catch (err) {
       setPreviewError(
@@ -106,7 +116,7 @@ export function CreateJoinGuildModal({
     try {
       const token = await getToken();
       if (!token) return;
-      const { guild_id } = await acceptInvite(token, code.trim());
+      const { guild_id } = await acceptInvite(token, parseInviteCode(code));
       onJoined(guild_id);
       onClose();
     } catch (err) {
@@ -186,7 +196,7 @@ export function CreateJoinGuildModal({
                     setPreview(null);
                     setPreviewError(null);
                   }}
-                  placeholder="Invite code"
+                  placeholder="Invite code or link"
                   className="h-10 flex-1 rounded-lg border-[#2A2F3A] bg-[#0F1217]/80 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:ring-[#F0A868]/25"
                 />
                 <Button

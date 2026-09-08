@@ -270,7 +270,8 @@ export function GuildSettingsModal({
   }
 
   function handleCopyInvite(code: string) {
-    void navigator.clipboard.writeText(code).then(() => {
+    const url = `${window.location.origin}/invite/${code}`;
+    void navigator.clipboard.writeText(url).then(() => {
       setCopiedCode(code);
       setTimeout(() => setCopiedCode((c) => (c === code ? null : c)), 1500);
     });
@@ -512,8 +513,10 @@ export function GuildSettingsModal({
                       key={inv.code}
                       className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
                     >
-                      <span className="font-mono text-sm text-[#E8EAED]">{inv.code}</span>
-                      <span className="text-xs text-[#8B93A1]">
+                      <span className="min-w-0 flex-1 truncate font-mono text-sm text-[#E8EAED]">
+                        /invite/{inv.code}
+                      </span>
+                      <span className="flex-none text-xs text-[#8B93A1]">
                         {inv.uses}/{inv.max_uses ?? "∞"} uses
                       </span>
                       <span className="ml-auto flex items-center gap-1">
