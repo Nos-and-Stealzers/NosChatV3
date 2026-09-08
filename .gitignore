@@ -1,0 +1,26 @@
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env*.local
+
+# Rust
+backend/target/
+backend/**/target/
+
+# Env files (never commit real secrets)
+.env
+*.env
+!*.env.example
+
+# Logs (may contain stack traces / connection info from local dev servers)
+*.log
+
+# Local page-dump artifacts (not source files, not meant to be tracked)
+register.html
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

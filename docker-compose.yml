@@ -1,0 +1,42 @@
+# Local dev only — homelab production stack (with OpenSearch, MinIO, mediasoup,
+# coturn, Caddy/Traefik) is separate and comes later per Spec Section 24.
+# This gives backend work a Postgres + Redis to run against without touching
+# the homelab yet.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: noschat-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: noschat
+      POSTGRES_PASSWORD: noschat
+      POSTGRES_DB: noschat
+    ports:
+      # Mapped to 5433 on the host, not 5432 — this machine already has a
+      # native Windows PostgreSQL service bound to 5432 (unrelated to this
+      # project), which was silently intercepting connections meant for this
+      # container (same symptom as wrong credentials, very confusing to debug).
+      # Postgres inside the container still listens on 5432 as normal; only
+      # the host-side port mapping changed.
+      - "5433:5432"
+    volumes:
+      - noschat_postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U noschat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: noschat-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - noschat_redis_dev_data:/data
+
+volumes:
+  noschat_postgres_dev_data:
+  noschat_redis_dev_data:
