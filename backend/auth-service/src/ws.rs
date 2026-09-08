@@ -310,7 +310,7 @@ async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent
             let snapshot = json!({
                 "type": "voice_channel_state",
                 "channel_id": channel_id,
-                "members": existing,
+                "user_ids": existing,
             });
             state.ws_hub.send_to(user_id, snapshot).await;
 
