@@ -1,5 +1,6 @@
 const AUTH_SERVICE_URL =
   process.env.NEXT_PUBLIC_AUTH_SERVICE_URL ?? "http://localhost:4000";
+export { AUTH_SERVICE_URL };
 
 export const WS_URL =
   process.env.NEXT_PUBLIC_AUTH_SERVICE_WS_URL ?? "ws://localhost:4000/ws";
@@ -470,6 +471,37 @@ export function unbanGuildMember(token: string, guildId: string, userId: string)
 
 export function listGuildBans(token: string, guildId: string) {
   return req<GuildBan[]>(`/guilds/${guildId}/bans`, token);
+}
+
+/// URL for a guild's icon image, if one is set. The frontend should
+/// fall back to the color-swatch initial when this 404s (no auth header
+/// possible on a plain <img> tag, matching the backend's deliberately
+/// public GET /guilds/:id/icon route).
+export function guildIconUrl(guildId: string): string {
+  return `${AUTH_SERVICE_URL}/guilds/${guildId}/icon`;
+}
+
+export async function uploadGuildIcon(token: string, guildId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${AUTH_SERVICE_URL}/guilds/${guildId}/icon`, {
+    method: "POST",
+    headers: { Authorization: authHeader(token) },
+    body: form,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    const message =
+      data && typeof data === "object" && "error" in data
+        ? (data as { error: string }).error
+        : `Upload failed with status ${res.status}`;
+    throw new Error(message);
+  }
+  return res.json() as Promise<{ status: string }>;
+}
+
+export function deleteGuildIcon(token: string, guildId: string) {
+  return req<void>(`/guilds/${guildId}/icon`, token, { method: "DELETE" });
 }
 
 // ---- Guild channels -------------------------------------------------------

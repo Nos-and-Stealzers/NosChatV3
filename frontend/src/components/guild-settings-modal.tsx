@@ -26,6 +26,9 @@ import {
   banGuildMember,
   unbanGuildMember,
   listGuildBans,
+  uploadGuildIcon,
+  deleteGuildIcon,
+  guildIconUrl,
   listRoles,
   createRole,
   updateRole,
@@ -82,6 +85,9 @@ export function GuildSettingsModal({
   const [nameDraft, setNameDraft] = useState("");
   const [colorDraft, setColorDraft] = useState("#F0A868");
   const [savingGeneral, setSavingGeneral] = useState(false);
+  const [uploadingIcon, setUploadingIcon] = useState(false);
+  const [iconImgKey, setIconImgKey] = useState(0);
+  const [iconHasImage, setIconHasImage] = useState(true);
 
   const [members, setMembers] = useState<GuildMember[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
@@ -160,6 +166,40 @@ export function GuildSettingsModal({
       setError(e instanceof Error ? e.message : "Failed to update server");
     } finally {
       setSavingGeneral(false);
+    }
+  }
+
+  async function handleIconFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploadingIcon(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await uploadGuildIcon(token, guildId, file);
+      setIconHasImage(true);
+      setIconImgKey((k) => k + 1);
+      onGuildUpdated?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to upload icon");
+    } finally {
+      setUploadingIcon(false);
+    }
+  }
+
+  async function handleRemoveIconImage() {
+    setUploadingIcon(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await deleteGuildIcon(token, guildId);
+      setIconHasImage(false);
+      onGuildUpdated?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove icon");
+    } finally {
+      setUploadingIcon(false);
     }
   }
 
@@ -359,6 +399,52 @@ export function GuildSettingsModal({
                     onChange={(e) => setNameDraft(e.target.value)}
                     className="h-10 rounded-lg border-[#2A2F3A] bg-[#0F1217]/80 text-[#E8EAED]"
                   />
+                </div>
+                <div>
+                  <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                    Server Icon
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="relative flex size-14 flex-none items-center justify-center overflow-hidden rounded-full font-display text-xl text-[#12151A]"
+                      style={{ backgroundColor: colorDraft }}
+                    >
+                      {iconHasImage && (
+                        // eslint-disable-next-line @next/next/no-img-element -- backend-hosted image
+                        <img
+                          key={iconImgKey}
+                          src={`${guildIconUrl(guildId)}?v=${iconImgKey}`}
+                          alt=""
+                          onError={() => setIconHasImage(false)}
+                          className="absolute inset-0 size-full object-cover"
+                        />
+                      )}
+                      {!iconHasImage && (detail?.name.trim()[0] ?? "?").toUpperCase()}
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="cursor-pointer">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleIconFileChange}
+                          disabled={uploadingIcon}
+                          className="hidden"
+                        />
+                        <span className="inline-flex h-8 items-center rounded-lg border border-[#2A2F3A] bg-[#0F1217]/80 px-3 text-xs font-medium text-[#E8EAED] transition-colors hover:border-[#3A4050]">
+                          {uploadingIcon ? "Uploading…" : "Upload Image"}
+                        </span>
+                      </label>
+                      {iconHasImage && (
+                        <button
+                          onClick={handleRemoveIconImage}
+                          disabled={uploadingIcon}
+                          className="text-left text-xs text-[#8B93A1] hover:text-[#EB5757]"
+                        >
+                          Remove image
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
                 <div>
                   <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">

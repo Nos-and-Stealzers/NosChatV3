@@ -166,6 +166,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/dms/{id}/read", post(dms::mark_read))
         .route("/guilds", get(guilds::list_guilds).post(guilds::create_guild))
         .route("/guilds/{id}", get(guilds::get_guild).patch(guilds::update_guild).delete(guilds::delete_guild))
+        .route(
+            "/guilds/{id}/icon",
+            get(guilds::get_guild_icon).post(guilds::upload_guild_icon).delete(guilds::delete_guild_icon),
+        )
         .route("/guilds/{id}/leave", post(guilds::leave_guild))
         .route("/guilds/{id}/members", get(guilds::list_members))
         .route("/guilds/{id}/members/{user_id}", axum::routing::delete(guilds::kick_member))

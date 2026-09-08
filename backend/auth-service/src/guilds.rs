@@ -2,8 +2,9 @@
 //! community layer. See migrations/0004_guilds.sql for the schema and the
 //! full bitfield permission layout (mirrored in the PERM_* constants below).
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Multipart, Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -472,6 +473,103 @@ pub async fn update_guild(
     };
 
     Ok(Json(json!({ "id": id, "name": name, "icon_color": icon_color })))
+}
+
+const MAX_ICON_BYTES: usize = 2 * 1024 * 1024; // 2MB — same inline-in-Postgres cap as sounds.rs
+
+/// `POST /guilds/:id/icon` — multipart image upload, requires MANAGE_GUILD.
+/// Stored inline in Postgres (icon_image/icon_image_mime), same pattern as
+/// user_sound_settings' custom clip upload — no object storage service
+/// exists yet. Setting an image doesn't clear icon_color (it stays as the
+/// fallback if the image is ever removed via DELETE).
+pub async fn upload_guild_icon(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut mime = "image/png".to_string();
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        bad_request(&format!("malformed upload: {e}"))
+    })? {
+        if field.name() == Some("file") {
+            if let Some(ct) = field.content_type() {
+                mime = ct.to_string();
+            }
+            let data = field.bytes().await.map_err(|e| bad_request(&format!("failed reading upload: {e}")))?;
+            if data.len() > MAX_ICON_BYTES {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({ "error": "image too large — max 2MB" })),
+                ));
+            }
+            if !mime.starts_with("image/") {
+                return Err(bad_request("file must be an image"));
+            }
+            bytes = Some(data.to_vec());
+        }
+    }
+
+    let Some(bytes) = bytes else {
+        return Err(bad_request("missing 'file' field"));
+    };
+
+    sqlx::query("UPDATE guilds SET icon_image = $1, icon_image_mime = $2, updated_at = now() WHERE id = $3")
+        .bind(&bytes)
+        .bind(&mime)
+        .bind(guild_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+/// `DELETE /guilds/:id/icon` — reverts to the color-swatch icon.
+pub async fn delete_guild_icon(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    sqlx::query("UPDATE guilds SET icon_image = NULL, icon_image_mime = NULL, updated_at = now() WHERE id = $1")
+        .bind(guild_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /guilds/:id/icon` — streams the raw image back. Deliberately NOT
+/// gated behind ClerkUser/membership: like Discord, a guild icon needs to
+/// be fetchable as a plain `<img src>` (no way to attach an Authorization
+/// header to an img tag), and it's not sensitive data. 404s if no image is
+/// set (frontend falls back to the color swatch in that case).
+pub async fn get_guild_icon(
+    State(state): State<AppState>,
+    Path(guild_id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row: Option<(Option<Vec<u8>>, Option<String>)> =
+        sqlx::query_as("SELECT icon_image, icon_image_mime FROM guilds WHERE id = $1")
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal_err)?;
+
+    let Some((Some(bytes), mime)) = row else {
+        return Err(not_found("no icon image set for this guild"));
+    };
+
+    let mime = mime.unwrap_or_else(|| "image/png".to_string());
+    Ok(([(header::CONTENT_TYPE, mime)], bytes))
 }
 
 /// `DELETE /guilds/:id` — owner only, not just MANAGE_GUILD.

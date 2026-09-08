@@ -8,7 +8,8 @@
 // DOM.
 
 import { Plus } from "lucide-react";
-import type { Guild } from "@/lib/backend-api";
+import { useState } from "react";
+import { guildIconUrl, type Guild } from "@/lib/backend-api";
 
 function guildInitial(name: string): string {
   return (name.trim()[0] ?? "?").toUpperCase();
@@ -27,15 +28,31 @@ function GuildIcon({
   hasUnread: boolean;
   onClick: () => void;
 }) {
+  // Every guild is tried as an image first (cheap 404 if none is set —
+  // no extra "does this guild have an icon" round trip needed), falling
+  // back to the color-swatch initial on load failure. Reset per guild id
+  // so switching to a different guild with the same img element re-tries
+  // its own image instead of staying stuck on the previous 404 state.
+  const [imgFailed, setImgFailed] = useState(false);
   return (
     <button
       onClick={onClick}
       data-active={active}
       title={guild.name}
-      className={`group relative flex flex-none items-center justify-center rounded-full font-display text-base text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset] transition-all duration-200 hover:rounded-xl data-[active=true]:rounded-xl ${compact ? "h-10 w-10" : "h-12 w-12"}`}
+      className={`group relative flex flex-none items-center justify-center overflow-hidden rounded-full font-display text-base text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset] transition-all duration-200 hover:rounded-xl data-[active=true]:rounded-xl ${compact ? "h-10 w-10" : "h-12 w-12"}`}
       style={{ backgroundColor: guild.icon_color }}
     >
-      {guildInitial(guild.name)}
+      {!imgFailed && (
+        // eslint-disable-next-line @next/next/no-img-element -- backend-hosted image, next/image config not worth it for a 2MB-cap inline blob
+        <img
+          key={guild.id}
+          src={guildIconUrl(guild.id)}
+          alt=""
+          onError={() => setImgFailed(true)}
+          className="absolute inset-0 size-full object-cover"
+        />
+      )}
+      {imgFailed && guildInitial(guild.name)}
       <span
         className={`pointer-events-none absolute -left-3 rounded-r-full bg-white transition-all duration-150 ${
           active
