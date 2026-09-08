@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { WS_URL } from "@/lib/backend-api";
+import { useSettings } from "@/lib/settings-context";
 
 export type RealtimeEvent =
   | { type: "message"; message: import("@/lib/backend-api").Message }
@@ -61,6 +62,15 @@ type RealtimeContextValue = {
   // open — call-context.tsx is responsible for treating that as a hard
   // failure (there's no retry queue here, same as sendTyping).
   sendCallSignal: (signal: CallSignal) => void;
+  // --- Developer-settings-gated debug surface --------------------------
+  // Real state pulled straight from the live socket, exposed for the
+  // Settings panel's WebSocket debug overlay (Developer category).
+  reconnectCount: number;
+  lastEventType: string | null;
+  lastEventAt: string | null;
+  // Forcibly closes the live socket — used by the Developer "Simulate
+  // connection loss" button to exercise the real reconnect path.
+  forceDisconnect: () => void;
 };
 
 const RealtimeContext = createContext<RealtimeContextValue | null>(null);
@@ -69,9 +79,18 @@ const RECONNECT_DELAY_MS = 2000;
 
 export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const { getToken } = useAuth();
+  const { settings } = useSettings();
   const listeners = useRef<Set<Listener>>(new Set());
   const socketRef = useRef<WebSocket | null>(null);
   const stoppedRef = useRef(false);
+  const [reconnectCount, setReconnectCount] = useState(0);
+  const [lastEventType, setLastEventType] = useState<string | null>(null);
+  const [lastEventAt, setLastEventAt] = useState<string | null>(null);
+  const isReconnectRef = useRef(false);
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   // Clerk hands back a new `getToken` function identity on effectively every
   // render. Putting it in the connect-effect's dependency array meant the
@@ -122,11 +141,24 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
       const socket = new WebSocket(url);
       socketRef.current = socket;
 
-      socket.onopen = () => setConnected(true);
+      socket.onopen = () => {
+        setConnected(true);
+        if (isReconnectRef.current) {
+          if (settingsRef.current.verboseLogging) {
+            console.log("[noschat:realtime] reconnected");
+          }
+        }
+        isReconnectRef.current = true;
+      };
 
       socket.onmessage = (evt) => {
         try {
           const parsed = JSON.parse(evt.data) as RealtimeEvent;
+          setLastEventType(parsed.type);
+          setLastEventAt(new Date().toISOString());
+          if (settingsRef.current.verboseLogging) {
+            console.log("[noschat:realtime] event", parsed.type, parsed);
+          }
           listeners.current.forEach((l) => l(parsed));
         } catch {
           // ignore malformed frames
@@ -135,7 +167,10 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
 
       socket.onclose = () => {
         setConnected(false);
-        if (!stoppedRef.current) setTimeout(connect, RECONNECT_DELAY_MS);
+        if (!stoppedRef.current) {
+          setReconnectCount((c) => c + 1);
+          setTimeout(connect, RECONNECT_DELAY_MS);
+        }
       };
       socket.onerror = () => socket.close();
     }
@@ -150,8 +185,23 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     // Intentionally run once per mount — see getTokenRef above.
   }, []);
 
+  const forceDisconnect = useCallback(() => {
+    socketRef.current?.close();
+  }, []);
+
   return (
-    <RealtimeContext.Provider value={{ subscribe, connected, sendTyping, sendCallSignal }}>
+    <RealtimeContext.Provider
+      value={{
+        subscribe,
+        connected,
+        sendTyping,
+        sendCallSignal,
+        reconnectCount,
+        lastEventType,
+        lastEventAt,
+        forceDisconnect,
+      }}
+    >
       {children}
     </RealtimeContext.Provider>
   );

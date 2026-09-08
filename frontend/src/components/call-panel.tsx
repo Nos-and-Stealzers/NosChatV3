@@ -18,6 +18,7 @@ import {
   ScreenShareOff,
 } from "lucide-react";
 import { useCall } from "@/lib/call-context";
+import { useSettings } from "@/lib/settings-context";
 
 function CallAvatar({ label }: { label: string }) {
   const initial = (label || "?").trim().charAt(0).toUpperCase() || "?";
@@ -30,8 +31,20 @@ function CallAvatar({ label }: { label: string }) {
 
 export function CallPanel({ peerLabel }: { peerLabel: string }) {
   const { call, cancelCall, hangUp, toggleMic, toggleCamera, toggleScreenShare } = useCall();
+  const { settings } = useSettings();
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+
+  function handleScreenShareClick() {
+    if (
+      !call.screenSharing &&
+      settings.screenShareConfirmPrompt &&
+      !window.confirm("Start sharing your screen with " + (peerLabel || "the other person") + "?")
+    ) {
+      return;
+    }
+    void toggleScreenShare();
+  }
 
   useEffect(() => {
     if (localVideoRef.current) localVideoRef.current.srcObject = call.localStream;
@@ -126,7 +139,7 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
 
           {isVideo && call.status === "active" && (
             <button
-              onClick={() => void toggleScreenShare()}
+              onClick={handleScreenShareClick}
               title={call.screenSharing ? "Stop sharing screen" : "Share screen"}
               className={`flex size-9 items-center justify-center rounded-full transition-colors ${
                 call.screenSharing

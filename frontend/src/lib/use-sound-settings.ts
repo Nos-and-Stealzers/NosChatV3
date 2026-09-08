@@ -11,9 +11,15 @@ import {
   type SoundsView,
 } from "@/lib/backend-api";
 import { playPreset } from "@/lib/sound-presets";
+import { useSettings } from "@/lib/settings-context";
 
 export function useSoundSettings() {
   const { getToken } = useAuth();
+  const { settings } = useSettings();
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
   const [sounds, setSounds] = useState<SoundsView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +41,7 @@ export function useSoundSettings() {
   }, [getToken]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 
@@ -68,6 +75,12 @@ export function useSoundSettings() {
 
   const play = useCallback(
     async (slot: SoundSlot) => {
+      const s = settingsRef.current;
+      if (s.muteAll) return;
+      if (slot === "message" && !s.notifyNewMessage) return;
+      if (slot === "ringtone" && !s.notifyIncomingCall) return;
+      const volume = (slot === "ringtone" ? s.ringtoneVolume : s.notificationVolume) / 100;
+
       const slotSettings = sounds?.[slot];
       if (slotSettings?.has_custom) {
         try {
@@ -79,13 +92,14 @@ export function useSoundSettings() {
             customUrlCache.current[slot] = url;
           }
           const audio = new Audio(url);
+          audio.volume = Math.min(1, Math.max(0, volume));
           void audio.play();
           return;
         } catch {
           // fall through to preset/default below
         }
       }
-      playPreset(slotSettings?.preset ?? (slot === "message" ? "pop" : "chime"));
+      playPreset(slotSettings?.preset ?? (slot === "message" ? "pop" : "chime"), volume);
     },
     [sounds, getToken],
   );

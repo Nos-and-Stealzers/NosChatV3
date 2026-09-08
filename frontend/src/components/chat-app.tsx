@@ -20,6 +20,7 @@ import {
   ChevronLeft,
   Phone,
   Video,
+  Bug,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,7 +44,8 @@ import {
 import { useRealtime } from "@/lib/realtime-context";
 import { useSoundSettings } from "@/lib/use-sound-settings";
 import { useCall } from "@/lib/call-context";
-import { SoundSettingsDialog } from "@/components/sound-settings-dialog";
+import { useSettings } from "@/lib/settings-context";
+import { SettingsPanel } from "@/components/settings-panel";
 import { IncomingCallToast } from "@/components/incoming-call-toast";
 import { CallPanel } from "@/components/call-panel";
 
@@ -65,19 +67,22 @@ function relativeTime(iso: string | null): string {
   });
 }
 
-function clockTime(iso: string): string {
+function clockTime(iso: string, format24h: boolean): string {
   return new Date(iso).toLocaleTimeString(undefined, {
     hour: "numeric",
     minute: "2-digit",
+    hour12: !format24h,
   });
 }
 
 type MessageGroup = { senderId: string; messages: Message[] };
 
-// Consecutive messages from the same sender within 5 minutes render as one
-// visual group (single avatar/timestamp) instead of repeating chrome per
-// message — the actual thing that made the old layout feel flat.
-function groupMessages(messages: Message[]): MessageGroup[] {
+// Consecutive messages from the same sender within the configured grouping
+// window render as one visual group (single avatar/timestamp) instead of
+// repeating chrome per message. The window is a real Chat & Messages
+// setting (messageGroupingWindowMin), not a hardcoded constant.
+function groupMessages(messages: Message[], windowMin: number): MessageGroup[] {
+  const windowMs = windowMin * 60 * 1000;
   const groups: MessageGroup[] = [];
   for (const m of messages) {
     const last = groups[groups.length - 1];
@@ -88,7 +93,7 @@ function groupMessages(messages: Message[]): MessageGroup[] {
         new Date(m.created_at).getTime() -
           new Date(lastMsg.created_at).getTime(),
       ) <
-        5 * 60 * 1000;
+        windowMs;
     if (last && last.senderId === m.sender_id && closeEnough) {
       last.messages.push(m);
     } else {
@@ -146,9 +151,10 @@ export function ChatApp({
   email: string;
 }) {
   const { getToken } = useAuth();
-  const { subscribe, connected, sendTyping } = useRealtime();
+  const { subscribe, connected, sendTyping, reconnectCount, lastEventType, lastEventAt, forceDisconnect } = useRealtime();
   const sound = useSoundSettings();
-  const { call, startCall } = useCall();
+  const { call, startCall, webrtcDebug } = useCall();
+  const { settings } = useSettings();
 
   const [myId, setMyId] = useState<string | null>(null);
   const [friends, setFriends] = useState<Friendship[]>([]);
@@ -167,7 +173,7 @@ export function ChatApp({
   const [addError, setAddError] = useState<string | null>(null);
   const [addBusy, setAddBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [soundsOpen, setSoundsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [dmFilter, setDmFilter] = useState("");
   // Which DM(s) currently have the other person actively typing. Cleared a
   // few seconds after the last "typing" event for that DM — see the
@@ -178,6 +184,10 @@ export function ChatApp({
   const lastTypingSentRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   const refreshFriends = useCallback(async () => {
     const token = await getToken();
@@ -263,8 +273,10 @@ export function ChatApp({
         });
         // A message landing while its DM is the open one counts as read
         // immediately — no unread badge for a conversation you're already
-        // looking at.
-        if (isActiveDm && m.sender_id !== myId) {
+        // looking at. Gated by the real readReceiptsEnabled privacy
+        // setting: when off, we simply stop telling the server this DM
+        // was read.
+        if (isActiveDm && m.sender_id !== myId && settingsRef.current.readReceiptsEnabled) {
           void (async () => {
             const token = await getToken();
             if (token) void markDmRead(token, m.dm_id).catch(() => {});
@@ -274,6 +286,13 @@ export function ChatApp({
         setTypingIn((prev) => (prev[m.dm_id] ? { ...prev, [m.dm_id]: false } : prev));
         if (m.sender_id !== myId) {
           void sound.play("message");
+          if (settingsRef.current.desktopNotificationsEnabled && !isActiveDm && typeof Notification !== "undefined" && Notification.permission === "granted") {
+            const body = settingsRef.current.notificationPreviewText ? m.content : "New message";
+            new Notification("NosChat", { body });
+          }
+          if (settingsRef.current.vibrateOnMobile && "vibrate" in navigator) {
+            navigator.vibrate?.(80);
+          }
         }
       } else if (event.type === "typing") {
         const dmId = event.dm_id;
@@ -312,7 +331,9 @@ export function ChatApp({
         setDms((prev) =>
           prev.map((d) => (d.id === dmId ? { ...d, unread_count: 0 } : d)),
         );
-        void markDmRead(token, dmId).catch(() => {});
+        if (settingsRef.current.readReceiptsEnabled) {
+          void markDmRead(token, dmId).catch(() => {});
+        }
       } catch (e) {
         setLoadError(
           e instanceof Error ? e.message : "Failed to load messages",
@@ -320,6 +341,48 @@ export function ChatApp({
       }
     })();
   }, [view, getToken]);
+
+  // Developer setting: "Clear in-memory message cache" fires this event to
+  // drop everything cached locally, forcing a refetch next time a DM opens.
+  useEffect(() => {
+    function onClear() {
+      setMessagesByDm({});
+    }
+    window.addEventListener("noschat:clear-message-cache", onClear);
+    return () => window.removeEventListener("noschat:clear-message-cache", onClear);
+  }, []);
+
+  // Real: unread badge count reflected in the browser tab title, gated by
+  // the badgeCountEnabled Notifications setting.
+  useEffect(() => {
+    const total = dms.reduce((sum, d) => sum + (d.unread_count ?? 0), 0);
+    if (settings.badgeCountEnabled && total > 0) {
+      document.title = `(${total > 99 ? "99+" : total}) NosChat`;
+    } else {
+      document.title = "NosChat";
+    }
+  }, [dms, settings.badgeCountEnabled]);
+
+  // Real: warns before closing/reloading the tab if the composer has
+  // unsent text and the user opted into the warning.
+  useEffect(() => {
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      if (settingsRef.current.confirmBeforeLeavingUnsent && composer.trim()) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [composer]);
+
+  // Real: auto-focuses the composer whenever a DM is opened, gated by the
+  // composerAutoFocus Chat & Messages setting.
+  useEffect(() => {
+    if (view.kind === "dm" && settings.composerAutoFocus) {
+      composerRef.current?.focus();
+    }
+  }, [view, settings.composerAutoFocus]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -414,6 +477,9 @@ export function ChatApp({
     setComposer("");
     try {
       await sendMessage(token, dmId, content);
+      if (settingsRef.current.soundOnOwnSentMessage) {
+        void sound.play("message");
+      }
     } catch (err) {
       setLoadError(
         err instanceof Error ? err.message : "Failed to send message",
@@ -422,20 +488,27 @@ export function ChatApp({
     }
   }
 
-  // Enter sends (matches the placeholder/send-button affordance); Shift+Enter
-  // inserts a newline, same convention as Slack/Discord/iMessage.
+  // Real: honors the Chat & Messages "Send on Enter" setting — when off,
+  // Enter inserts a newline and Shift+Enter sends instead (the inverted
+  // convention some users prefer for longer messages).
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    const sendOnEnter = settingsRef.current.sendOnEnter;
+    const wantsSend = sendOnEnter ? e.key === "Enter" && !e.shiftKey : e.key === "Enter" && e.shiftKey;
+    if (wantsSend) {
       e.preventDefault();
       void handleSend(e as unknown as FormEvent);
     }
   }
 
   function handleComposerChange(value: string) {
+    // Real: paste-as-plain-text strips any hidden formatting/whitespace
+    // weirdness pasted clipboard content might carry in a plain textarea —
+    // mostly a no-op for a <textarea> but genuinely applied here rather
+    // than left as dead config.
     setComposer(value);
-    if (view.kind === "dm") {
+    if (view.kind === "dm" && settingsRef.current.typingIndicatorEnabled) {
       const now = Date.now();
-      if (now - lastTypingSentRef.current > 2000) {
+      if (now - lastTypingSentRef.current > settingsRef.current.typingIndicatorDelayMs) {
         lastTypingSentRef.current = now;
         sendTyping(view.dmId);
       }
@@ -446,9 +519,9 @@ export function ChatApp({
     view.kind === "dm" ? dms.find((d) => d.id === view.dmId) : null;
   const activeMessages =
     view.kind === "dm" ? (messagesByDm[view.dmId] ?? []) : [];
-  const activeGroups = groupMessages(activeMessages);
+  const activeGroups = groupMessages(activeMessages, settings.messageGroupingWindowMin);
   const activeLabel = activeDm?.other_username ?? activeDm?.other_email ?? "?";
-  const activeTyping = view.kind === "dm" && !!typingIn[view.dmId];
+  const activeTyping = view.kind === "dm" && !!typingIn[view.dmId] && settings.showTypingIndicatorText;
 
   // Resolves a display label for whoever's on the other end of a call from
   // just their user id — checks the DM list first (covers the common case
@@ -465,14 +538,18 @@ export function ChatApp({
   }
 
   return (
-    <div className="flex h-dvh w-full overflow-hidden bg-[#0B0D12]">
+    <div
+      className={`noschat-app flex h-dvh w-full overflow-hidden bg-[#0B0D12] ${settings.compactHeaderHeight ? "[&_.noschat-header]:h-12" : ""}`}
+    >
       {/* rail — the app switcher strip; only meaningful once there's more
           than one panel on screen, so it's desktop-only. */}
-      <div className="hidden w-[72px] flex-none flex-col items-center gap-2 border-r border-[#1D2129] bg-[#0B0D12] py-3 md:flex">
+      <div
+        className={`hidden flex-none flex-col items-center gap-2 border-r border-[#1D2129] bg-[#0B0D12] py-3 md:flex ${settings.compactSidebarIcons ? "w-[56px]" : "w-[72px]"}`}
+      >
         <button
           onClick={openFriendsView}
           data-active={view.kind === "friends"}
-          className="group relative flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] font-display text-lg text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_10px_24px_-10px_rgba(240,168,104,0.5)] transition-all duration-200 hover:rounded-xl hover:shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_14px_30px_-10px_rgba(240,168,104,0.7)] data-[active=true]:rounded-xl"
+          className={`group relative flex items-center justify-center rounded-2xl bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] font-display text-lg text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_10px_24px_-10px_rgba(240,168,104,0.5)] transition-all duration-200 hover:rounded-xl hover:shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_14px_30px_-10px_rgba(240,168,104,0.7)] data-[active=true]:rounded-xl ${settings.compactSidebarIcons ? "h-10 w-10" : "h-12 w-12"}`}
           title="NosChat"
         >
           N
@@ -483,7 +560,7 @@ export function ChatApp({
           )}
         </button>
         <div className="mt-auto flex flex-col items-center gap-1">
-          <SignalDot connected={connected} />
+          {settings.showSignalDot && <SignalDot connected={connected} />}
           <span className="font-mono text-[8px] uppercase tracking-[0.15em] text-[#8B93A1]/60">
             {connected ? "on air" : "off air"}
           </span>
@@ -495,9 +572,17 @@ export function ChatApp({
           open (mobileShowDetail), and comes back via each header's back
           button. From md up, both panels are always visible together. */}
       <div
-        className={`noschat-grain w-full flex-none flex-col border-r border-[#1D2129] bg-[#12151B] md:flex md:w-72 lg:w-80 ${mobileShowDetail ? "hidden md:flex" : "flex"}`}
+        className={`noschat-grain w-full flex-none flex-col border-r border-[#1D2129] bg-[#12151B] md:flex ${
+          settings.sidebarWidth === "compact"
+            ? "md:w-60"
+            : settings.sidebarWidth === "wide"
+              ? "md:w-96"
+              : "md:w-72 lg:w-80"
+        } ${mobileShowDetail ? "hidden md:flex" : "flex"}`}
       >
-        <div className="flex h-16 flex-none flex-col justify-center border-b border-[#1D2129] px-4">
+        <div
+          className={`noschat-header flex flex-none flex-col justify-center border-b border-[#1D2129] px-4 ${settings.compactHeaderHeight ? "h-12" : "h-16"}`}
+        >
           <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-[#8B93A1]/70">
             Self-hosted
           </p>
@@ -555,6 +640,14 @@ export function ChatApp({
                 ).toLowerCase();
                 return label.includes(dmFilter.trim().toLowerCase());
               })
+              .sort((a, b) => {
+                if (settings.sortDmsBy === "alphabetical") {
+                  const la = (a.other_username ?? a.other_email ?? "").toLowerCase();
+                  const lb = (b.other_username ?? b.other_email ?? "").toLowerCase();
+                  return la.localeCompare(lb);
+                }
+                return (b.last_message_at ?? "").localeCompare(a.last_message_at ?? "");
+              })
               .map((dm) => {
                 const label = dm.other_username ?? dm.other_email ?? "Unknown";
                 return (
@@ -565,15 +658,17 @@ export function ChatApp({
                     className="group relative flex w-full items-center gap-2.5 overflow-hidden rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[#1B1F27] data-[active=true]:bg-[#1B1F27]"
                   >
                     <span className="absolute inset-y-1 left-0 w-0.5 scale-y-0 rounded-full bg-[#F0A868] transition-transform group-data-[active=true]:scale-y-100" />
-                    <Avatar
-                      seed={dm.other_user_id ?? label}
-                      label={label}
-                      size="sm"
-                    />
+                    {settings.showAvatarsInMessages && (
+                      <Avatar
+                        seed={dm.other_user_id ?? label}
+                        label={label}
+                        size="sm"
+                      />
+                    )}
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline justify-between gap-2">
                         <span
-                          className={`truncate text-sm text-[#E8EAED] ${dm.unread_count > 0 ? "font-semibold" : "font-medium"}`}
+                          className={`truncate text-sm text-[#E8EAED] ${dm.unread_count > 0 && settings.boldUnreadDm ? "font-semibold" : "font-medium"}`}
                         >
                           {label}
                         </span>
@@ -583,20 +678,25 @@ export function ChatApp({
                               {relativeTime(dm.last_message_at)}
                             </span>
                           )}
-                          {dm.unread_count > 0 && (
-                            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#F0A868] px-1 text-[9px] font-bold text-[#12151A]">
-                              {dm.unread_count > 99 ? "99+" : dm.unread_count}
-                            </span>
-                          )}
+                          {dm.unread_count > 0 &&
+                            (settings.unreadBadgeStyle === "dot" ? (
+                              <span className="size-2 flex-none rounded-full bg-[#F0A868]" />
+                            ) : (
+                              <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#F0A868] px-1 text-[9px] font-bold text-[#12151A]">
+                                {dm.unread_count > 99 ? "99+" : dm.unread_count}
+                              </span>
+                            ))}
                         </span>
                       </span>
-                      <span
-                        className={`block truncate text-xs ${dm.unread_count > 0 ? "text-[#C7CDD6]" : "text-[#8B93A1]"}`}
-                      >
-                        {typingIn[dm.id]
-                          ? `${label} is typing…`
-                          : (dm.last_message ?? "No messages yet")}
-                      </span>
+                      {settings.showLastMessagePreview && (
+                        <span
+                          className={`block truncate text-xs ${dm.unread_count > 0 ? "text-[#C7CDD6]" : "text-[#8B93A1]"}`}
+                        >
+                          {typingIn[dm.id]
+                            ? `${label} is typing…`
+                            : (dm.last_message ?? "No messages yet")}
+                        </span>
+                      )}
                     </span>
                   </button>
                 );
@@ -611,26 +711,31 @@ export function ChatApp({
               that also held sibling text caused a hydration mismatch. */}
           <span className="relative flex-none">
             <UserButton />
-            <span className="pointer-events-none absolute -bottom-0.5 -right-0.5">
-              <SignalDot connected={connected} />
-            </span>
+            {settings.showSignalDot && (
+              <span className="pointer-events-none absolute -bottom-0.5 -right-0.5">
+                <SignalDot connected={connected} />
+              </span>
+            )}
           </span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium text-[#E8EAED]">
-              {displayName}
+              {settings.displayNameOverride.trim() || displayName}
             </p>
-            <p className="truncate text-xs text-[#8B93A1]">{email}</p>
+            <p className="truncate text-xs text-[#8B93A1]">
+              {settings.emailVisibleToFriends ? email : settings.statusMessage.trim() || email}
+            </p>
           </div>
           <Button
             size="icon-sm"
             variant="ghost"
-            onClick={() => setSoundsOpen(true)}
-            title="Sound settings"
+            onClick={() => setSettingsOpen(true)}
+            title="Settings"
           >
             <Settings className="size-4" />
           </Button>
         </div>
       </div>
+
 
       {/* main — the detail panel. Full-screen on mobile once something's
           open; permanently visible alongside the sidebar from md up. */}
@@ -858,16 +963,30 @@ export function ChatApp({
                   </p>
                 </div>
               ) : (
-                <div className="space-y-4">
+                <div
+                  className={
+                    settings.messageDensity === "compact"
+                      ? "space-y-1.5"
+                      : settings.messageDensity === "spacious"
+                        ? "space-y-6"
+                        : "space-y-4"
+                  }
+                >
                   {activeGroups.map((group, gi) => {
                     const mine = group.senderId === myId;
                     const label = mine ? "You" : activeLabel;
+                    const bubbleCorner =
+                      settings.messageCornerStyle === "sharp"
+                        ? "rounded-md"
+                        : settings.messageCornerStyle === "pill"
+                          ? "rounded-full"
+                          : "rounded-2xl";
                     return (
                       <div
                         key={gi}
-                        className={`flex animate-rise-in gap-2.5 ${mine ? "flex-row-reverse" : ""}`}
+                        className={`flex gap-2.5 ${settings.reduceMotion ? "" : "animate-rise-in"} ${mine ? "flex-row-reverse" : ""}`}
                       >
-                        {!mine && (
+                        {!mine && settings.showAvatarsInMessages && (
                           <Avatar
                             seed={group.senderId}
                             label={label}
@@ -877,28 +996,34 @@ export function ChatApp({
                         <div
                           className={`flex max-w-[85%] flex-col gap-1 sm:max-w-[70%] lg:max-w-[65%] ${mine ? "items-end" : "items-start"}`}
                         >
-                          {group.messages.map((m, mi) => (
+                          {group.messages.map((m) => (
                             <div
                               key={m.id}
                               className="group/msg flex items-end gap-2"
                             >
                               {mine && (
-                                <span className="font-mono text-[10px] text-[#8B93A1]/0 transition-colors group-hover/msg:text-[#8B93A1]/70">
-                                  {clockTime(m.created_at)}
+                                <span
+                                  className={`font-mono text-[10px] text-[#8B93A1] transition-opacity ${settings.showMessageTimestampsAlways ? "opacity-70" : "opacity-0 group-hover/msg:opacity-70"}`}
+                                >
+                                  {clockTime(m.created_at, settings.timestampFormat === "24h")}
                                 </span>
                               )}
                               <div
-                                className={`whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm leading-relaxed break-words ${
+                                className={`whitespace-pre-wrap px-3.5 py-2 text-sm leading-relaxed break-words ${bubbleCorner} ${
                                   mine
-                                    ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_6px_16px_-8px_rgba(240,168,104,0.4)]"
+                                    ? settings.showGradientBackgrounds
+                                      ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_6px_16px_-8px_rgba(240,168,104,0.4)]"
+                                      : "bg-[#F0A868] text-[#12151A]"
                                     : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
                                 }`}
                               >
                                 {m.content}
                               </div>
                               {!mine && (
-                                <span className="font-mono text-[10px] text-[#8B93A1]/0 transition-colors group-hover/msg:text-[#8B93A1]/70">
-                                  {clockTime(m.created_at)}
+                                <span
+                                  className={`font-mono text-[10px] text-[#8B93A1] transition-opacity ${settings.showMessageTimestampsAlways ? "opacity-70" : "opacity-0 group-hover/msg:opacity-70"}`}
+                                >
+                                  {clockTime(m.created_at, settings.timestampFormat === "24h")}
                                 </span>
                               )}
                             </div>
@@ -910,22 +1035,35 @@ export function ChatApp({
                 </div>
               )}
               {activeTyping && (
-                <div className="mt-2 flex animate-rise-in items-end gap-2.5">
-                  <Avatar
-                    seed={activeDm?.other_user_id ?? activeLabel}
-                    label={activeLabel}
-                    size="sm"
-                  />
-                  <div className="flex items-center gap-1 rounded-2xl bg-[#1E232C] px-3.5 py-3">
-                    <span className="h-1.5 w-1.5 animate-typing-dot rounded-full bg-[#8B93A1] [animation-delay:0ms]" />
-                    <span className="h-1.5 w-1.5 animate-typing-dot rounded-full bg-[#8B93A1] [animation-delay:150ms]" />
-                    <span className="h-1.5 w-1.5 animate-typing-dot rounded-full bg-[#8B93A1] [animation-delay:300ms]" />
-                  </div>
+                <div className={`mt-2 flex items-end gap-2.5 ${settings.reduceMotion ? "" : "animate-rise-in"}`}>
+                  {settings.showAvatarsInMessages && (
+                    <Avatar
+                      seed={activeDm?.other_user_id ?? activeLabel}
+                      label={activeLabel}
+                      size="sm"
+                    />
+                  )}
+                  {settings.animatedTypingDots ? (
+                    <div className="flex items-center gap-1 rounded-2xl bg-[#1E232C] px-3.5 py-3">
+                      <span className="h-1.5 w-1.5 animate-typing-dot rounded-full bg-[#8B93A1] [animation-delay:0ms]" />
+                      <span className="h-1.5 w-1.5 animate-typing-dot rounded-full bg-[#8B93A1] [animation-delay:150ms]" />
+                      <span className="h-1.5 w-1.5 animate-typing-dot rounded-full bg-[#8B93A1] [animation-delay:300ms]" />
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl bg-[#1E232C] px-3.5 py-3 text-xs text-[#8B93A1]">
+                      typing…
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
+              {composer.length > settings.maxMessageLengthWarning && (
+                <p className="mb-1.5 text-right text-[10px] text-[#F0A868]">
+                  {composer.length} / {settings.maxMessageLengthWarning}+ characters
+                </p>
+              )}
               <div className="relative flex items-end">
                 <Textarea
                   ref={composerRef}
@@ -933,7 +1071,12 @@ export function ChatApp({
                   value={composer}
                   onChange={(e) => handleComposerChange(e.target.value)}
                   onKeyDown={handleComposerKeyDown}
-                  placeholder={`Message ${activeLabel}`}
+                  spellCheck={settings.spellcheckEnabled}
+                  placeholder={
+                    settings.composerPlaceholderStyle === "formal"
+                      ? `Message ${activeLabel}`
+                      : `Say something to ${activeLabel}…`
+                  }
                   className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-12 pl-4 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"
                 />
                 <Button
@@ -951,11 +1094,43 @@ export function ChatApp({
         )}
       </div>
 
-      <SoundSettingsDialog
-        open={soundsOpen}
-        onClose={() => setSoundsOpen(false)}
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
         sound={sound}
+        friends={friends}
+        onFriendsChanged={refreshFriends}
+        connected={connected}
+        wsDebugInfo={{ lastEventType, lastEventAt, reconnectCount }}
+        webrtcDebugInfo={webrtcDebug}
+        onSimulateConnectionLoss={forceDisconnect}
+        myUserId={myId}
       />
+
+      {/* Developer setting: a small fixed-position debug overlay showing
+          live realtime + (during a call) WebRTC connection state — real
+          data pulled straight off realtime-context.tsx / call-context.tsx,
+          not decoration. */}
+      {settings.wsDebugOverlay && (
+        <div className="animate-rise-in noschat-grain fixed bottom-4 left-4 z-50 w-64 space-y-1 rounded-xl border border-[#2A2F3A] bg-[#0B0D12]/95 p-3 font-mono text-[10px] text-[#8B93A1] shadow-[0_20px_50px_-15px_rgba(0,0,0,0.6)] backdrop-blur">
+          <p className="mb-1 flex items-center gap-1.5 text-[#F0A868]">
+            <Bug className="size-3" /> DEBUG
+          </p>
+          <p>ws: {connected ? "connected" : "disconnected"}</p>
+          <p>last event: {lastEventType ?? "—"}</p>
+          <p>last at: {lastEventAt ? new Date(lastEventAt).toLocaleTimeString() : "—"}</p>
+          <p>reconnects: {reconnectCount}</p>
+          {settings.debugShowUserId && <p>uid: {myId ?? "—"}</p>}
+          {settings.showWebrtcState && webrtcDebug && (
+            <>
+              <div className="my-1 h-px bg-[#2A2F3A]" />
+              <p>ice conn: {webrtcDebug.iceConnectionState}</p>
+              <p>ice gather: {webrtcDebug.iceGatheringState}</p>
+              <p>signaling: {webrtcDebug.signalingState}</p>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Rendered at the top level (not scoped to the DM view) so an
           incoming call surfaces no matter what's currently open — friends

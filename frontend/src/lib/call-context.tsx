@@ -26,6 +26,7 @@ import {
 } from "react";
 import { useRealtime, type RealtimeEvent } from "@/lib/realtime-context";
 import { useSoundSettings } from "@/lib/use-sound-settings";
+import { useSettings } from "@/lib/settings-context";
 
 export type CallStatus =
   | "idle"
@@ -78,6 +79,12 @@ function parseIceServers(): RTCIceServer[] {
   return [{ urls: "stun:stun.l.google.com:19302" }];
 }
 
+export type WebrtcDebugState = {
+  iceConnectionState: string;
+  iceGatheringState: string;
+  signalingState: string;
+};
+
 type CallContextValue = {
   call: CallState;
   // Caller-side: rings the peer, does NOT create the offer yet (waits for
@@ -98,6 +105,9 @@ type CallContextValue = {
   toggleMic: () => void;
   toggleCamera: () => void;
   toggleScreenShare: () => Promise<void>;
+  // --- Developer-settings-gated debug surface (real, pulled off the live
+  // RTCPeerConnection) --------------------------------------------------
+  webrtcDebug: WebrtcDebugState | null;
 };
 
 const CallContext = createContext<CallContextValue | null>(null);
@@ -105,8 +115,14 @@ const CallContext = createContext<CallContextValue | null>(null);
 export function CallProvider({ children }: { children: React.ReactNode }) {
   const { subscribe, sendCallSignal, connected } = useRealtime();
   const sound = useSoundSettings();
+  const { settings } = useSettings();
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   const [call, setCall] = useState<CallState>(IDLE_STATE);
+  const [webrtcDebug, setWebrtcDebug] = useState<WebrtcDebugState | null>(null);
 
   // Mutable call-session refs. These deliberately live outside React state
   // because they're plumbing (peer connection, raw streams, queued ICE
@@ -183,10 +199,28 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
   const buildPeerConnection = useCallback(
     (dmId: string) => {
-      const pc = new RTCPeerConnection({ iceServers: parseIceServers() });
+      const pc = new RTCPeerConnection({
+        iceServers: parseIceServers(),
+        iceTransportPolicy: settingsRef.current.forceTurnRelay ? "relay" : "all",
+      });
+
+      const syncDebugState = () => {
+        if (!settingsRef.current.showWebrtcState) {
+          setWebrtcDebug(null);
+          return;
+        }
+        setWebrtcDebug({
+          iceConnectionState: pc.iceConnectionState,
+          iceGatheringState: pc.iceGatheringState,
+          signalingState: pc.signalingState,
+        });
+      };
 
       pc.onicecandidate = (evt) => {
         if (evt.candidate) {
+          if (settingsRef.current.verboseLogging) {
+            console.log("[noschat:call] ice candidate", evt.candidate);
+          }
           sendCallSignal({
             type: "call_ice_candidate",
             dm_id: dmId,
@@ -200,8 +234,15 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         setCall((prev) => ({ ...prev, remoteStream: stream ?? prev.remoteStream }));
       };
 
+      pc.onicegatheringstatechange = syncDebugState;
+      pc.onsignalingstatechange = syncDebugState;
+
       pc.oniceconnectionstatechange = () => {
+        syncDebugState();
         const state = pc.iceConnectionState;
+        if (settingsRef.current.verboseLogging) {
+          console.log("[noschat:call] iceConnectionState ->", state);
+        }
         if (state === "connected" || state === "completed") {
           setCall((prev) =>
             prev.status === "connecting" ? { ...prev, status: "active" } : prev,
@@ -217,10 +258,35 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       };
 
       pcRef.current = pc;
+      syncDebugState();
       return pc;
     },
     [sendCallSignal, endAndNotify],
   );
+
+  // Builds real getUserMedia constraints from the current settings —
+  // selected device id (if any), plus echo cancellation / noise
+  // suppression / auto gain control / resolution cap toggles.
+  const buildAudioConstraints = useCallback((): MediaTrackConstraints | boolean => {
+    const s = settingsRef.current;
+    const constraints: MediaTrackConstraints = {
+      echoCancellation: s.echoCancellation,
+      noiseSuppression: s.noiseSuppression,
+      autoGainControl: s.autoGainControl,
+    };
+    if (s.defaultMicDeviceId) constraints.deviceId = { exact: s.defaultMicDeviceId };
+    return constraints;
+  }, []);
+
+  const buildVideoConstraints = useCallback((): MediaTrackConstraints | boolean => {
+    const s = settingsRef.current;
+    const heightMap: Record<string, number> = { "480p": 480, "720p": 720, "1080p": 1080 };
+    const constraints: MediaTrackConstraints = {
+      height: { ideal: heightMap[s.videoQualityCap] ?? 720 },
+    };
+    if (s.defaultCameraDeviceId) constraints.deviceId = { exact: s.defaultCameraDeviceId };
+    return constraints;
+  }, []);
 
   const attachLocalTracks = useCallback((pc: RTCPeerConnection, stream: MediaStream) => {
     for (const track of stream.getTracks()) {
@@ -297,11 +363,19 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     stopRingLoop();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: callTypeRef.current === "video",
+        audio: buildAudioConstraints(),
+        video: callTypeRef.current === "video" ? buildVideoConstraints() : false,
       });
       localStreamRef.current = stream;
-      setCall((prev) => ({ ...prev, status: "connecting", localStream: stream }));
+      if (settingsRef.current.autoMuteOnJoin) {
+        stream.getAudioTracks().forEach((t) => (t.enabled = false));
+      }
+      setCall((prev) => ({
+        ...prev,
+        status: "connecting",
+        localStream: stream,
+        micMuted: settingsRef.current.autoMuteOnJoin,
+      }));
 
       const pc = buildPeerConnection(dmIdRef.current);
       attachLocalTracks(pc, stream);
@@ -320,7 +394,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       }));
       endAndNotify();
     }
-  }, [call.status, buildPeerConnection, attachLocalTracks, sendCallSignal, endAndNotify, stopRingLoop]);
+  }, [call.status, buildPeerConnection, attachLocalTracks, sendCallSignal, endAndNotify, stopRingLoop, buildAudioConstraints, buildVideoConstraints]);
 
   const rejectCall = useCallback(() => {
     if (call.status !== "ringing-incoming" || !dmIdRef.current) return;
@@ -368,8 +442,12 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
+      const heightMap: Record<string, number> = { "720p": 720, "1080p": 1080, "1440p": 1440 };
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+        video: {
+          height: { ideal: heightMap[settingsRef.current.screenShareResolution] ?? 1080 },
+          frameRate: { ideal: settingsRef.current.screenShareFrameRate },
+        },
         audio: false,
       });
       const [screenTrack] = displayStream.getVideoTracks();
@@ -441,11 +519,19 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           stopRingLoop();
           try {
             const stream = await navigator.mediaDevices.getUserMedia({
-              audio: true,
-              video: callTypeRef.current === "video",
+              audio: buildAudioConstraints(),
+              video: callTypeRef.current === "video" ? buildVideoConstraints() : false,
             });
             localStreamRef.current = stream;
-            setCall((prev) => ({ ...prev, status: "connecting", localStream: stream }));
+            if (settingsRef.current.autoMuteOnJoin) {
+              stream.getAudioTracks().forEach((t) => (t.enabled = false));
+            }
+            setCall((prev) => ({
+              ...prev,
+              status: "connecting",
+              localStream: stream,
+              micMuted: settingsRef.current.autoMuteOnJoin,
+            }));
 
             const pc = buildPeerConnection(event.dm_id);
             attachLocalTracks(pc, stream);
@@ -521,6 +607,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     endAndNotify,
     teardown,
     stopRingLoop,
+    buildAudioConstraints,
+    buildVideoConstraints,
   ]);
 
   // Belt-and-suspenders cleanup if the whole provider unmounts mid-call
@@ -547,6 +635,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         toggleMic,
         toggleCamera,
         toggleScreenShare,
+        webrtcDebug,
       }}
     >
       {children}

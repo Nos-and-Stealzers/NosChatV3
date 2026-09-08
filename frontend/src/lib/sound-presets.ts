@@ -51,26 +51,26 @@ function tone(
   osc.stop(start + duration + 0.05);
 }
 
-const PLAYERS: Record<PresetKey, () => void> = {
-  pop: () => tone(880, 0, 0.12, "sine", 0.3),
-  beep: () => tone(660, 0, 0.15, "square", 0.15),
-  chime: () => {
-    tone(1046.5, 0, 0.4, "sine", 0.25);
-    tone(1318.5, 0.08, 0.4, "sine", 0.2);
+const PLAYERS: Record<PresetKey, (volume: number) => void> = {
+  pop: (v) => tone(880, 0, 0.12, "sine", 0.3 * v),
+  beep: (v) => tone(660, 0, 0.15, "square", 0.15 * v),
+  chime: (v) => {
+    tone(1046.5, 0, 0.4, "sine", 0.25 * v);
+    tone(1318.5, 0.08, 0.4, "sine", 0.2 * v);
   },
-  marimba: () => {
-    tone(523.25, 0, 0.3, "triangle", 0.3);
-    tone(659.25, 0.1, 0.3, "triangle", 0.25);
-    tone(783.99, 0.2, 0.35, "triangle", 0.2);
+  marimba: (v) => {
+    tone(523.25, 0, 0.3, "triangle", 0.3 * v);
+    tone(659.25, 0.1, 0.3, "triangle", 0.25 * v);
+    tone(783.99, 0.2, 0.35, "triangle", 0.2 * v);
   },
-  alert: () => {
-    tone(740, 0, 0.2, "sawtooth", 0.2);
-    tone(740, 0.25, 0.2, "sawtooth", 0.2);
-    tone(740, 0.5, 0.2, "sawtooth", 0.2);
+  alert: (v) => {
+    tone(740, 0, 0.2, "sawtooth", 0.2 * v);
+    tone(740, 0.25, 0.2, "sawtooth", 0.2 * v);
+    tone(740, 0.5, 0.2, "sawtooth", 0.2 * v);
   },
 };
 
-export function playPreset(key: string) {
+export function playPreset(key: string, volume = 1) {
   const player = PLAYERS[key as PresetKey];
-  if (player) player();
+  if (player) player(Math.min(1, Math.max(0, volume)));
 }

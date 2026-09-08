@@ -1,5 +1,6 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
+import { SettingsProvider } from "@/lib/settings-context";
 import { RealtimeProvider } from "@/lib/realtime-context";
 import { CallProvider } from "@/lib/call-context";
 import { ChatApp } from "@/components/chat-app";
@@ -20,10 +21,12 @@ export default async function Home() {
   const email = user.primaryEmailAddress?.emailAddress ?? "";
 
   return (
-    <RealtimeProvider>
-      <CallProvider>
-        <ChatApp displayName={displayName} email={email} />
-      </CallProvider>
-    </RealtimeProvider>
+    <SettingsProvider>
+      <RealtimeProvider>
+        <CallProvider>
+          <ChatApp displayName={displayName} email={email} />
+        </CallProvider>
+      </RealtimeProvider>
+    </SettingsProvider>
   );
 }

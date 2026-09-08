@@ -130,6 +130,111 @@
   }
 }
 
+/* --- NosChat settings-driven layer --------------------------------------
+   Real, visible CSS effects driven by data-attributes that
+   settings-context.tsx sets on <html> from the Settings panel. Additive —
+   components still carry their own Tailwind classes; these rules only
+   override the specific hardcoded amber values / motion / scale that the
+   corresponding settings claim to control. */
+
+:root {
+  --accent-1: #F3B57E;
+  --accent-2: #EB9A50;
+  --accent-solid: #F0A868;
+  --accent-tint: rgba(240, 168, 104, 0.12);
+  --app-font-scale: 1;
+}
+
+html[data-accent="amber"] {
+  --accent-1: #F3B57E;
+  --accent-2: #EB9A50;
+  --accent-solid: #F0A868;
+  --accent-tint: rgba(240, 168, 104, 0.12);
+}
+html[data-accent="teal"] {
+  --accent-1: #7EE0CE;
+  --accent-2: #3FA88F;
+  --accent-solid: #5FD9C4;
+  --accent-tint: rgba(95, 217, 196, 0.12);
+}
+html[data-accent="violet"] {
+  --accent-1: #B79CF5;
+  --accent-2: #8B6FE0;
+  --accent-solid: #A283EE;
+  --accent-tint: rgba(162, 131, 238, 0.12);
+}
+html[data-accent="rose"] {
+  --accent-1: #F5A0C0;
+  --accent-2: #E05F94;
+  --accent-solid: #EE7FAA;
+  --accent-tint: rgba(238, 127, 170, 0.12);
+}
+html[data-accent="blue"] {
+  --accent-1: #8FC0F5;
+  --accent-2: #4F86D8;
+  --accent-solid: #6FA5EE;
+  --accent-tint: rgba(111, 165, 238, 0.12);
+}
+html[data-accent="green"] {
+  --accent-1: #A3E58F;
+  --accent-2: #5FA84A;
+  --accent-solid: #86D468;
+  --accent-tint: rgba(134, 212, 104, 0.12);
+}
+
+html[data-font-scale="small"] { --app-font-scale: 0.9; }
+html[data-font-scale="medium"] { --app-font-scale: 1; }
+html[data-font-scale="large"] { --app-font-scale: 1.15; }
+html { font-size: calc(16px * var(--app-font-scale)); }
+
+html[data-reduce-motion="on"] .animate-signal-pulse,
+html[data-reduce-motion="on"] .animate-rise-in,
+html[data-reduce-motion="on"] .animate-typing-dot {
+  animation: none !important;
+}
+
+html[data-grain="off"] .noschat-grain::before {
+  display: none;
+}
+
+html[data-font-family="system"] body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-font-family="mono"] body {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+html[data-high-contrast="on"] .text-\[\#8B93A1\] {
+  color: #B7BEC9 !important;
+}
+
+html[data-uppercase-labels="off"] .font-mono.uppercase,
+html[data-uppercase-labels="off"] [class*="tracking-"].uppercase {
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+
+/* Accent-color re-theme: targets the literal amber hex substrings baked
+   into chat-app.tsx / call-panel.tsx / incoming-call-toast.tsx /
+   sound-settings-dialog.tsx class strings, scoped to .noschat-app (the
+   post-login app shell) so the Clerk sign-in screens keep their own fixed
+   brand color. Substring attribute matching means this works regardless
+   of Tailwind's exact generated CSS. */
+.noschat-app [class*="text-[#F0A868]"] { color: var(--accent-solid) !important; }
+.noschat-app [class*="hover:text-[#F0A868]"]:hover { color: var(--accent-solid) !important; }
+.noschat-app [class*="data-[active=true]:text-[#F0A868]"][data-active="true"] { color: var(--accent-solid) !important; }
+.noschat-app [class*="border-[#F0A868]"] { border-color: color-mix(in oklab, var(--accent-solid) 100%, transparent) !important; }
+.noschat-app [class*="hover:border-[#F0A868]"]:hover { border-color: color-mix(in oklab, var(--accent-solid) 40%, transparent) !important; }
+.noschat-app [class*="data-[active=true]:border-[#F0A868]"][data-active="true"] { border-color: var(--accent-solid) !important; }
+.noschat-app [class*="bg-[#F0A868]/20"] { background-color: color-mix(in oklab, var(--accent-solid) 20%, transparent) !important; }
+.noschat-app [class*="data-[active=true]:bg-[#F0A868]/10"][data-active="true"] { background-color: color-mix(in oklab, var(--accent-solid) 10%, transparent) !important; }
+.noschat-app [class*="bg-[#F0A868]"]:not([class*="/"]) { background-color: var(--accent-solid) !important; }
+.noschat-app [class*="focus-visible:ring-[#F0A868]"]:focus-visible { --tw-ring-color: var(--accent-solid) !important; }
+.noschat-app [class*="focus-visible:border-[#F0A868]"]:focus-visible,
+.noschat-app [class*="focus:border-[#F0A868]"]:focus { border-color: var(--accent-solid) !important; }
+.noschat-app [class*="from-[#F3B57E]"] { --tw-gradient-from: var(--accent-1) var(--tw-gradient-from-position, 0%) !important; }
+.noschat-app [class*="to-[#EB9A50]"] { --tw-gradient-to: var(--accent-2) var(--tw-gradient-to-position, 100%) !important; }
+
 /* --- NosChat signature layer -------------------------------------------
    A quiet grain texture over the near-black panels for depth (instead of
    flat color fields), plus the keyframes that back the app's one bold
