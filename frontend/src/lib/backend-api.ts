@@ -447,6 +447,31 @@ export function kickGuildMember(token: string, guildId: string, userId: string) 
   });
 }
 
+export type GuildBan = {
+  user_id: string;
+  username: string | null;
+  banned_by: string;
+  reason: string | null;
+  created_at: string;
+};
+
+export function banGuildMember(token: string, guildId: string, userId: string, reason?: string) {
+  return req<void>(`/guilds/${guildId}/bans/${userId}`, token, {
+    method: "PUT",
+    body: JSON.stringify({ reason: reason || undefined }),
+  });
+}
+
+export function unbanGuildMember(token: string, guildId: string, userId: string) {
+  return req<void>(`/guilds/${guildId}/bans/${userId}`, token, {
+    method: "DELETE",
+  });
+}
+
+export function listGuildBans(token: string, guildId: string) {
+  return req<GuildBan[]>(`/guilds/${guildId}/bans`, token);
+}
+
 // ---- Guild channels -------------------------------------------------------
 
 export function createGuildChannel(

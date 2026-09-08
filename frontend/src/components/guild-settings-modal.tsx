@@ -14,6 +14,7 @@ import {
   ArrowDown,
   Copy,
   Check,
+  Ban as BanIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,6 +23,9 @@ import {
   updateGuild,
   listGuildMembers,
   kickGuildMember,
+  banGuildMember,
+  unbanGuildMember,
+  listGuildBans,
   listRoles,
   createRole,
   updateRole,
@@ -35,11 +39,12 @@ import {
   PERMISSIONS,
   type GuildDetail,
   type GuildMember,
+  type GuildBan,
   type Role,
   type Invite,
 } from "@/lib/backend-api";
 
-type Tab = "general" | "roles" | "members" | "invites";
+type Tab = "general" | "roles" | "members" | "bans" | "invites";
 
 const ICON_COLORS = [
   "#F0A868", "#5FD9C4", "#8FA6F0", "#E88FD0", "#F0C868", "#7ED0E8", "#EB5757", "#4ADE80",
@@ -81,6 +86,7 @@ export function GuildSettingsModal({
   const [members, setMembers] = useState<GuildMember[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
+  const [bans, setBans] = useState<GuildBan[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [newInviteMaxUses, setNewInviteMaxUses] = useState("");
@@ -107,6 +113,9 @@ export function GuildSettingsModal({
         setRoles(await listRoles(token, guildId));
       }
       setMembers(await listGuildMembers(token, guildId));
+      if (hasPermission(d.my_permissions, PERMISSIONS.BAN_MEMBERS)) {
+        setBans(await listGuildBans(token, guildId));
+      }
       if (hasPermission(d.my_permissions, PERMISSIONS.MANAGE_GUILD)) {
         setInvites(await listInvites(token, guildId));
       }
@@ -129,11 +138,13 @@ export function GuildSettingsModal({
   const canManageGuild = hasPermission(myPerms, PERMISSIONS.MANAGE_GUILD);
   const canManageRoles = hasPermission(myPerms, PERMISSIONS.MANAGE_ROLES);
   const canKick = hasPermission(myPerms, PERMISSIONS.KICK_MEMBERS);
+  const canBan = hasPermission(myPerms, PERMISSIONS.BAN_MEMBERS);
 
   const tabs: { id: Tab; label: string; visible: boolean }[] = [
     { id: "general" as Tab, label: "General", visible: canManageGuild },
     { id: "roles" as Tab, label: "Roles", visible: canManageRoles },
     { id: "members" as Tab, label: "Members", visible: true },
+    { id: "bans" as Tab, label: "Bans", visible: canBan },
     { id: "invites" as Tab, label: "Invites", visible: canManageGuild },
   ].filter((t) => t.visible);
 
@@ -217,6 +228,28 @@ export function GuildSettingsModal({
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to kick member");
+    }
+  }
+
+  async function handleBan(userId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await banGuildMember(token, guildId, userId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to ban member");
+    }
+  }
+
+  async function handleUnban(userId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await unbanGuildMember(token, guildId, userId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to unban member");
     }
   }
 
@@ -470,12 +503,53 @@ export function GuildSettingsModal({
                           <Trash2 className="size-3.5 text-[#EB5757]" />
                         </Button>
                       )}
+                      {canBan && (
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          onClick={() => handleBan(m.user_id)}
+                          className="hover:bg-[#EB5757]/10"
+                          title="Ban"
+                        >
+                          <BanIcon className="size-3.5 text-[#EB5757]" />
+                        </Button>
+                      )}
                     </div>
                   );
                 })}
               </div>
             )}
 
+            {tab === "bans" && canBan && (
+              <div className="space-y-2">
+                {bans.length === 0 && (
+                  <p className="text-sm text-[#8B93A1]">No banned users.</p>
+                )}
+                {bans.map((b) => (
+                  <div
+                    key={b.user_id}
+                    className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
+                  >
+                    <BanIcon className="size-3.5 flex-none text-[#EB5757]" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm text-[#E8EAED]">
+                        {b.username ?? b.user_id}
+                      </p>
+                      {b.reason && (
+                        <p className="truncate text-xs text-[#8B93A1]">{b.reason}</p>
+                      )}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleUnban(b.user_id)}
+                    >
+                      Unban
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
             {tab === "invites" && canManageGuild && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-end gap-2">

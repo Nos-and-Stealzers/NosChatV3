@@ -26,7 +26,6 @@ pub const PERM_SPEAK: i64 = 16;
 pub const PERM_MANAGE_CHANNELS: i64 = 32;
 pub const PERM_MANAGE_ROLES: i64 = 64;
 pub const PERM_KICK_MEMBERS: i64 = 128;
-#[allow(dead_code)]
 pub const PERM_BAN_MEMBERS: i64 = 256;
 pub const PERM_MANAGE_GUILD: i64 = 512;
 pub const PERM_ADMINISTRATOR: i64 = 1_073_741_824;
@@ -625,6 +624,138 @@ pub async fn kick_member(
     force_disconnect_guild_voice(&state, guild_id, user_id).await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, Default)]
+pub struct BanMemberBody {
+    pub reason: Option<String>,
+}
+
+const MAX_BAN_REASON_LEN: usize = 512;
+
+/// `PUT /guilds/:id/bans/:user_id` — bans by user id (works even if they
+/// were never a member, matching Discord). Removes any existing
+/// membership too, so an existing member is both kicked and banned in one
+/// step. Requires BAN_MEMBERS; owner can't be banned.
+pub async fn ban_member(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, user_id)): Path<(Uuid, Uuid)>,
+    body: Option<Json<BanMemberBody>>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_BAN_MEMBERS).await?;
+
+    if user_id == me {
+        return Err(bad_request("you can't ban yourself"));
+    }
+
+    let owner: Option<(Uuid,)> = sqlx::query_as("SELECT owner_id FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let Some((owner_id,)) = owner else {
+        return Err(not_found("guild not found"));
+    };
+    if owner_id == user_id {
+        return Err(forbidden("can't ban the guild owner"));
+    }
+
+    let reason = body.and_then(|b| b.0.reason).map(|r| {
+        r.chars().take(MAX_BAN_REASON_LEN).collect::<String>()
+    });
+
+    let mut tx = state.db.begin().await.map_err(internal_err)?;
+
+    sqlx::query("DELETE FROM guild_members WHERE guild_id = $1 AND user_id = $2")
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+
+    sqlx::query(
+        "INSERT INTO guild_bans (guild_id, user_id, banned_by, reason)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (guild_id, user_id) DO UPDATE SET banned_by = $3, reason = $4, created_at = now()",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .bind(me)
+    .bind(&reason)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    tx.commit().await.map_err(internal_err)?;
+
+    force_disconnect_guild_voice(&state, guild_id, user_id).await;
+
+    // Tell the banned user's own client(s), so an open guild UI tab can
+    // navigate away immediately instead of looking accessible while
+    // actually cut off server-side.
+    state.ws_hub.send_to(user_id, json!({
+        "type": "guild_banned", "guild_id": guild_id,
+    })).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /guilds/:id/bans/:user_id` — lifts a ban, doesn't re-add
+/// membership (they need a fresh invite, matching Discord).
+pub async fn unban_member(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_BAN_MEMBERS).await?;
+
+    sqlx::query("DELETE FROM guild_bans WHERE guild_id = $1 AND user_id = $2")
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct BanView {
+    pub user_id: Uuid,
+    pub username: Option<String>,
+    pub banned_by: Uuid,
+    pub reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /guilds/:id/bans` — requires BAN_MEMBERS (this is moderator-only
+/// info, unlike the member list which any member can see).
+pub async fn list_bans(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Vec<BanView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_BAN_MEMBERS).await?;
+
+    let rows: Vec<BanView> = sqlx::query_as(
+        r#"
+        SELECT b.user_id, u.username, b.banned_by, b.reason, b.created_at
+        FROM guild_bans b
+        JOIN users u ON u.id = b.user_id
+        WHERE b.guild_id = $1
+        ORDER BY b.created_at DESC
+        "#,
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows))
 }
 
 // ---------------------------------------------------------------------
@@ -1548,6 +1679,18 @@ pub async fn accept_invite(
         if uses >= max {
             return Err(not_found("invite has been used up"));
         }
+    }
+
+    let banned: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT guild_id FROM guild_bans WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(guild_id)
+    .bind(me)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+    if banned.is_some() {
+        return Err(forbidden("you are banned from this server"));
     }
 
     let already_member: Option<(Uuid,)> =

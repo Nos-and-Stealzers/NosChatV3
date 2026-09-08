@@ -746,6 +746,14 @@ export function ChatApp({
             [event.guild_id]: (prev[event.guild_id] ?? 0) + 1,
           }));
         }
+      } else if (event.type === "guild_banned") {
+        // Server-authoritative removal — force the view back to friends if
+        // this was the guild we were looking at, and drop it from the
+        // sidebar list immediately rather than waiting for a manual refresh.
+        setGuilds((prev) => prev.filter((g) => g.id !== event.guild_id));
+        if (view.kind === "guild" && view.guildId === event.guild_id) {
+          openFriendsView();
+        }
       }
     });
   }, [subscribe, myId, refreshFriends, refreshDms, sound, view, getToken]);

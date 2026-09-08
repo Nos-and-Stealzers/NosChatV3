@@ -55,6 +55,11 @@ export type RealtimeEvent =
       message_id: string;
       reactions: import("@/lib/backend-api").ReactionSummary[];
     }
+  // Sent directly to a user's own client(s) the moment they're banned from
+  // a guild, so an open tab on that guild's view navigates away instead of
+  // looking accessible while actually cut off server-side (see guilds.rs
+  // ban_member).
+  | { type: "guild_banned"; guild_id: string }
   // --- WebRTC call signaling (server->client, fanned out from ws.rs) -----
   // Each carries `dm_id` + `from` (the sender's user id) so the recipient
   // knows which DM and who's calling/signaling, plus whatever payload that
