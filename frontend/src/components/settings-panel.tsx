@@ -78,6 +78,7 @@ const CATEGORY_ICONS: Record<CategoryId, React.ComponentType<{ className?: strin
 export function SettingsPanel({
   open,
   onClose,
+  initialCategory,
   sound,
   friends,
   onFriendsChanged,
@@ -89,6 +90,7 @@ export function SettingsPanel({
 }: {
   open: boolean;
   onClose: () => void;
+  initialCategory?: CategoryId;
   sound: SoundHook;
   friends: Friendship[];
   onFriendsChanged: () => void | Promise<void>;
@@ -99,7 +101,7 @@ export function SettingsPanel({
   myUserId: string | null;
 }) {
   const { settings, update } = useSettings();
-  const [activeCategory, setActiveCategory] = useState<CategoryId>("account");
+  const [activeCategory, setActiveCategory] = useState<CategoryId>(initialCategory ?? "account");
   const [query, setQuery] = useState("");
   const [railOpen, setRailOpen] = useState(false);
 
@@ -116,8 +118,14 @@ export function SettingsPanel({
     if (open) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setQuery("");
+      // Jump to whichever category the caller asked for each time the panel
+      // opens (e.g. the account menu opening straight to "account") rather
+      // than only on first mount — the panel instance stays mounted across
+      // opens/closes, so this has to re-run per open, not just once.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setActiveCategory(initialCategory ?? "account");
     }
-  }, [open]);
+  }, [open, initialCategory]);
 
   if (!open) return null;
 

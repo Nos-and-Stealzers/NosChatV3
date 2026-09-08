@@ -8,7 +8,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { useAuth, UserButton } from "@clerk/nextjs";
+import { useAuth, useClerk, useUser } from "@clerk/nextjs";
 import {
   MessageSquare,
   Users,
@@ -21,6 +21,7 @@ import {
   Phone,
   Video,
   Bug,
+  LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -143,6 +144,90 @@ function SignalDot({ connected }: { connected: boolean }) {
   );
 }
 
+// Replaces Clerk's default <UserButton/> menu. Clerk's built-in "Manage
+// account" item can only be reordered, never retargeted — clicking it
+// always opens Clerk's own <UserProfile/> modal with no supported override
+// (see Clerk docs: adding-items/user-button). Per the product decision to
+// have account settings live in this app's own Settings panel instead of
+// Clerk's separate UI, this is a small hand-rolled dropdown built on
+// Clerk's own useUser()/useClerk() hooks (Clerk's documented pattern for
+// full custom-menu control) rather than <UserButton>. Real avatar/name/
+// email straight from Clerk; "Manage account" opens our Settings panel on
+// the Account category; "Sign out" calls Clerk's real signOut().
+function AccountMenu({ onOpenSettings }: { onOpenSettings: () => void }) {
+  const { user } = useUser();
+  const { signOut } = useClerk();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKey(e: globalThis.KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const label = user?.username ?? user?.primaryEmailAddress?.emailAddress ?? "Account";
+  const email = user?.primaryEmailAddress?.emailAddress ?? "";
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex size-9 items-center justify-center overflow-hidden rounded-full transition-opacity hover:opacity-90"
+        title="Account"
+      >
+        {user?.imageUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element -- Clerk-hosted avatar, remote domain not worth configuring next/image for
+          <img src={user.imageUrl} alt="" className="size-9 rounded-full object-cover" />
+        ) : (
+          <Avatar seed={user?.id ?? label} label={label} />
+        )}
+      </button>
+
+      {open && (
+        <div className="animate-rise-in absolute bottom-11 left-0 z-50 w-56 overflow-hidden rounded-xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] py-1.5 shadow-[0_0_0_1px_rgba(240,168,104,0.06),0_20px_50px_-15px_rgba(0,0,0,0.7)]">
+          <div className="border-b border-white/[0.06] px-3 py-2.5">
+            <p className="truncate text-sm font-medium text-[#E8EAED]">{label}</p>
+            {email && <p className="truncate text-xs text-[#8B93A1]">{email}</p>}
+          </div>
+          <button
+            onClick={() => {
+              setOpen(false);
+              onOpenSettings();
+            }}
+            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[#E8EAED] transition-colors hover:bg-[#1B1F27]"
+          >
+            <Settings className="size-4 text-[#8B93A1]" />
+            Manage account
+          </button>
+          <button
+            onClick={() => {
+              setOpen(false);
+              void signOut();
+            }}
+            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[#E8EAED] transition-colors hover:bg-[#1B1F27]"
+          >
+            <LogOut className="size-4 text-[#8B93A1]" />
+            Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChatApp({
   displayName,
   email,
@@ -174,6 +259,8 @@ export function ChatApp({
   const [addBusy, setAddBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialCategory, setSettingsInitialCategory] =
+    useState<import("@/lib/settings-context").CategoryId>("account");
   const [dmFilter, setDmFilter] = useState("");
   // Which DM(s) currently have the other person actively typing. Cleared a
   // few seconds after the last "typing" event for that DM — see the
@@ -705,12 +792,8 @@ export function ChatApp({
         </div>
 
         <div className="flex flex-none items-center gap-2 border-t border-[#1D2129] bg-[#0B0D12]/60 px-2.5 py-2.5">
-          {/* A plain span wrapper (not a positioned div sibling with its own
-              children) so React's server/client tree for Clerk's portal-
-              mounted UserButton lines up exactly — nesting it inside a div
-              that also held sibling text caused a hydration mismatch. */}
           <span className="relative flex-none">
-            <UserButton />
+            <AccountMenu onOpenSettings={() => { setSettingsInitialCategory("account"); setSettingsOpen(true); }} />
             {settings.showSignalDot && (
               <span className="pointer-events-none absolute -bottom-0.5 -right-0.5">
                 <SignalDot connected={connected} />
@@ -1097,6 +1180,7 @@ export function ChatApp({
       <SettingsPanel
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
+        initialCategory={settingsInitialCategory}
         sound={sound}
         friends={friends}
         onFriendsChanged={refreshFriends}
