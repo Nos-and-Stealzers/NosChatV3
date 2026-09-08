@@ -306,6 +306,7 @@ export const SETTINGS_CATALOG: SettingDef[] = [
   { id: "bio", category: "account", label: "Bio", description: "A short personal bio, stored locally for now.", type: "text", wire: "local" },
   { id: "showBirthdate", category: "account", label: "Show birthdate on profile", description: "No birthdate field exists in the backend yet.", type: "toggle", wire: "stub" },
   { id: "copyUserId", category: "account", label: "Copy your user ID", description: "Copies your real backend user id to the clipboard.", type: "custom", wire: "real" },
+  { id: "presenceAndProfile", category: "account", label: "Presence & profile", description: "Set your status (online/idle/dnd/invisible), bio, pronouns, status message, and profile colors — synced to the real backend and visible to friends live.", type: "custom", wire: "real" },
   { id: "manageSessions", category: "account", label: "Manage account & sessions", description: "Opens Clerk's account portal (security / sessions tab).", type: "custom", wire: "real" },
   { id: "twoFactorAuth", category: "account", label: "Two-factor authentication", description: "Opens Clerk's account security settings.", type: "custom", wire: "real" },
   { id: "deleteAccount", category: "account", label: "Delete account", description: "Opens Clerk's account portal to permanently delete your account.", type: "custom", wire: "real" },

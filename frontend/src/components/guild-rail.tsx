@@ -18,11 +18,13 @@ function GuildIcon({
   guild,
   active,
   compact,
+  hasUnread,
   onClick,
 }: {
   guild: Guild;
   active: boolean;
   compact: boolean;
+  hasUnread: boolean;
   onClick: () => void;
 }) {
   return (
@@ -41,6 +43,9 @@ function GuildIcon({
             : "h-2 w-1 opacity-0 group-hover:h-2.5 group-hover:opacity-70"
         }`}
       />
+      {hasUnread && !active && (
+        <span className="animate-badge-pop pointer-events-none absolute -bottom-0.5 -right-0.5 size-3.5 rounded-full border-2 border-[#0B0D12] bg-[#EB5757]" />
+      )}
     </button>
   );
 }
@@ -49,12 +54,14 @@ export function GuildRail({
   guilds,
   activeGuildId,
   compact,
+  unreadGuildIds,
   onSelectGuild,
   onOpenCreateJoin,
 }: {
   guilds: Guild[];
   activeGuildId: string | null;
   compact: boolean;
+  unreadGuildIds?: Set<string>;
   onSelectGuild: (guildId: string) => void;
   onOpenCreateJoin: () => void;
 }) {
@@ -68,6 +75,7 @@ export function GuildRail({
             guild={g}
             active={activeGuildId === g.id}
             compact={compact}
+            hasUnread={unreadGuildIds?.has(g.id) ?? false}
             onClick={() => onSelectGuild(g.id)}
           />
         ))}

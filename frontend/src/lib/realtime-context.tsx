@@ -17,6 +17,44 @@ export type RealtimeEvent =
   | { type: "friend_request"; friendship_id: string; from: string }
   | { type: "friend_accepted"; friendship_id: string; from: string }
   | { type: "typing"; dm_id: string; user_id: string }
+  // Fanned out to every accepted friend whenever a user's effective status
+  // (online/idle/dnd/offline) or status_text changes — see
+  // backend/auth-service/src/profiles.rs `broadcast_presence`, called from
+  // ws.rs on socket connect/disconnect and from profiles.rs on explicit
+  // presence-mode / status_text edits.
+  | {
+      type: "presence_update";
+      user_id: string;
+      status: import("@/lib/backend-api").PresenceStatus;
+      status_text: string | null;
+    }
+  | { type: "message_edited"; message: import("@/lib/backend-api").Message }
+  | { type: "message_deleted"; dm_id: string; message_id: string }
+  | {
+      type: "reaction_update";
+      dm_id: string;
+      message_id: string;
+      reactions: import("@/lib/backend-api").ReactionSummary[];
+    }
+  | {
+      type: "guild_message_edited";
+      guild_id: string;
+      channel_id: string;
+      message: import("@/lib/backend-api").GuildMessage;
+    }
+  | {
+      type: "guild_message_deleted";
+      guild_id: string;
+      channel_id: string;
+      message_id: string;
+    }
+  | {
+      type: "guild_reaction_update";
+      guild_id: string;
+      channel_id: string;
+      message_id: string;
+      reactions: import("@/lib/backend-api").ReactionSummary[];
+    }
   // --- WebRTC call signaling (server->client, fanned out from ws.rs) -----
   // Each carries `dm_id` + `from` (the sender's user id) so the recipient
   // knows which DM and who's calling/signaling, plus whatever payload that

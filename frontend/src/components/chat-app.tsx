@@ -28,6 +28,8 @@ import {
   Smile,
   Inbox,
   ShieldCheck,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,6 +46,9 @@ import {
   listMessages,
   sendMessage,
   markDmRead,
+  editDmMessage,
+  deleteDmMessage,
+  toggleDmReaction,
   type Friendship,
   type DmSummary,
   type Message,
@@ -61,6 +66,11 @@ import { CreateJoinGuildModal } from "@/components/create-join-guild-modal";
 import { GuildView } from "@/components/guild-view";
 import { GuildSettingsModal } from "@/components/guild-settings-modal";
 import { listGuilds, type Guild } from "@/lib/backend-api";
+import { ConfirmModal } from "@/components/confirm-modal";
+import { ReactionBar } from "@/components/reaction-bar";
+import { usePresence } from "@/lib/presence-context";
+import { AvatarWithStatus, StatusDot } from "@/components/status-dot";
+import { ProfileCard } from "@/components/profile-card";
 
 type View = { kind: "friends" } | { kind: "dm"; dmId: string } | { kind: "guild"; guildId: string };
 
@@ -179,6 +189,52 @@ function Avatar({
   );
 }
 
+// Wraps Avatar with a real-time status dot + click-to-open profile card —
+// the shared building block behind every clickable Discord-style avatar in
+// this file (account menu, friend rows, DM header, message senders).
+// `userId` doubles as the avatarRamp seed so colors stay consistent with
+// plain <Avatar seed=... /> usages elsewhere that haven't been swapped over.
+function AvatarWithProfile({
+  userId,
+  label,
+  size = "md",
+  dotSize,
+}: {
+  userId: string;
+  label: string;
+  size?: "sm" | "md" | "lg";
+  dotSize?: "sm" | "md" | "lg";
+}) {
+  const { statusOf, ownProfile } = usePresence();
+  const [open, setOpen] = useState(false);
+  const isSelf = !!ownProfile && userId === ownProfile.id;
+  return (
+    <span className="relative inline-flex flex-none">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="rounded-full transition-transform hover:scale-105"
+      >
+        <AvatarWithStatus status={statusOf(userId)} dotSize={dotSize ?? (size === "sm" ? "sm" : "md")}>
+          <Avatar seed={userId} label={label} size={size} />
+        </AvatarWithStatus>
+      </button>
+      {open && (
+        <ProfileCard
+          userId={userId}
+          isSelf={isSelf}
+          label={label}
+          onClose={() => setOpen(false)}
+          anchorClassName="absolute top-full left-0 mt-2"
+        />
+      )}
+    </span>
+  );
+}
+
 // The app's one bold, load-bearing motif: a dot that reflects whether the
 // websocket to our own auth-service is actually open right now (see
 // realtime-context.tsx `connected`). Real state, not decoration — this is
@@ -217,6 +273,7 @@ function AccountMenu({
   const { user } = useUser();
   const { signOut } = useClerk();
   const [open, setOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -239,6 +296,7 @@ function AccountMenu({
 
   const label = user?.username ?? user?.primaryEmailAddress?.emailAddress ?? "Account";
   const email = user?.primaryEmailAddress?.emailAddress ?? "";
+  const { ownProfile } = usePresence();
 
   return (
     <div ref={rootRef} className="relative">
@@ -247,12 +305,14 @@ function AccountMenu({
         className="flex size-9 items-center justify-center overflow-hidden rounded-full transition-opacity hover:opacity-90"
         title="Account"
       >
-        {user?.imageUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element -- Clerk-hosted avatar, remote domain not worth configuring next/image for
-          <img src={user.imageUrl} alt="" className="size-9 rounded-full object-cover" />
-        ) : (
-          <Avatar seed={user?.id ?? label} label={label} />
-        )}
+        <AvatarWithStatus status={ownProfile?.status ?? "offline"}>
+          {user?.imageUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element -- Clerk-hosted avatar, remote domain not worth configuring next/image for
+            <img src={user.imageUrl} alt="" className="size-9 rounded-full object-cover" />
+          ) : (
+            <Avatar seed={user?.id ?? label} label={label} />
+          )}
+        </AvatarWithStatus>
       </button>
 
       {open && (
@@ -261,6 +321,16 @@ function AccountMenu({
             <p className="truncate text-sm font-medium text-[#E8EAED]">{label}</p>
             {email && <p className="truncate text-xs text-[#8B93A1]">{email}</p>}
           </div>
+          <button
+            onClick={() => {
+              setOpen(false);
+              setProfileOpen(true);
+            }}
+            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[#E8EAED] transition-colors hover:bg-[#1B1F27]"
+          >
+            <StatusDot status={ownProfile?.status ?? "offline"} />
+            Set status / edit profile
+          </button>
           <button
             onClick={() => {
               setOpen(false);
@@ -295,6 +365,15 @@ function AccountMenu({
           </button>
         </div>
       )}
+      {profileOpen && ownProfile && (
+        <ProfileCard
+          userId={ownProfile.id}
+          isSelf
+          label={label}
+          onClose={() => setProfileOpen(false)}
+          anchorClassName="absolute bottom-11 left-0"
+        />
+      )}
     </div>
   );
 }
@@ -308,6 +387,12 @@ export function ChatApp({
 }) {
   const { getToken } = useAuth();
   const { subscribe, connected, sendTyping, reconnectCount, lastEventType, lastEventAt, forceDisconnect } = useRealtime();
+  const { statusOf } = usePresence();
+  // dm.other_user_id is nullable in the wire type; wraps statusOf to keep
+  // the JSX call sites terse.
+  function statusOfDm(otherUserId: string | null) {
+    return statusOf(otherUserId);
+  }
   const sound = useSoundSettings();
   const { call, startCall, webrtcDebug } = useCall();
   const { settings } = useSettings();
@@ -337,6 +422,16 @@ export function ChatApp({
     useState<import("@/lib/settings-context").CategoryId>("account");
   const [guilds, setGuilds] = useState<Guild[]>([]);
   const [createJoinOpen, setCreateJoinOpen] = useState(false);
+  // guild_id -> total unread across all its text channels, reported up by
+  // each GuildView instance (see its onUnreadChanged prop) so the rail's
+  // ping dot stays accurate even for guilds that aren't the active view.
+  const [unreadByGuild, setUnreadByGuild] = useState<Record<string, number>>({});
+  const handleGuildUnreadChanged = useCallback((guildId: string, total: number) => {
+    setUnreadByGuild((prev) => {
+      if (prev[guildId] === total) return prev;
+      return { ...prev, [guildId]: total };
+    });
+  }, []);
   const [guildSettingsOpen, setGuildSettingsOpen] = useState(false);
   const [guildSettingsInitialTab, setGuildSettingsInitialTab] = useState<
     "general" | "roles" | "members" | "invites"
@@ -360,6 +455,17 @@ export function ChatApp({
   // "Copy message" affordance state on the hover toolbar — tracks which
   // message id was just copied so the icon can flash a checkmark.
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  // Inline edit state: which message is currently being edited + its draft
+  // text. Only ever set for the current user's own messages (edit/delete
+  // icons only render for `mine` bubbles — enforced in the JSX below, and
+  // by the backend rejecting non-sender edits/deletes regardless).
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  // Pending delete confirmation — routed through the shared ConfirmModal
+  // rather than window.confirm(), matching the rest of this codebase.
+  const [pendingDeleteMessage, setPendingDeleteMessage] = useState<{ dmId: string; id: string } | null>(null);
+  const [deletingMessage, setDeletingMessage] = useState(false);
   // Composer quick-emoji picker open/closed.
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
@@ -386,6 +492,71 @@ export function ChatApp({
     } catch {
       // Clipboard permission denied or unavailable — silently no-op, not
       // worth surfacing an error banner for a nice-to-have affordance.
+    }
+  }
+
+  function startEditMessage(m: Message) {
+    setEditingMessageId(m.id);
+    setEditDraft(m.content);
+  }
+
+  function cancelEditMessage() {
+    setEditingMessageId(null);
+    setEditDraft("");
+  }
+
+  async function saveEditMessage(dmId: string, messageId: string) {
+    const content = editDraft.trim();
+    if (!content) return;
+    setEditSaving(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const updated = await editDmMessage(token, dmId, messageId, content);
+      setMessagesByDm((prev) => ({
+        ...prev,
+        [dmId]: (prev[dmId] ?? []).map((x) => (x.id === messageId ? updated : x)),
+      }));
+      setEditingMessageId(null);
+      setEditDraft("");
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to edit message");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function confirmDeleteMessage() {
+    if (!pendingDeleteMessage) return;
+    const { dmId, id } = pendingDeleteMessage;
+    setDeletingMessage(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await deleteDmMessage(token, dmId, id);
+      setMessagesByDm((prev) => ({
+        ...prev,
+        [dmId]: (prev[dmId] ?? []).filter((x) => x.id !== id),
+      }));
+      setPendingDeleteMessage(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to delete message");
+    } finally {
+      setDeletingMessage(false);
+    }
+  }
+
+  async function handleToggleReaction(dmId: string, messageId: string, emoji: string) {
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const reactions = await toggleDmReaction(token, dmId, messageId, emoji);
+      setMessagesByDm((prev) => ({
+        ...prev,
+        [dmId]: (prev[dmId] ?? []).map((x) => (x.id === messageId ? { ...x, reactions } : x)),
+      }));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to react");
     }
   }
 
@@ -536,6 +707,45 @@ export function ChatApp({
         void sound.play("ringtone");
       } else if (event.type === "friend_accepted") {
         void refreshFriends();
+      } else if (event.type === "message_edited") {
+        const m = event.message;
+        setMessagesByDm((prev) => {
+          const existing = prev[m.dm_id];
+          if (!existing) return prev;
+          return { ...prev, [m.dm_id]: existing.map((x) => (x.id === m.id ? m : x)) };
+        });
+      } else if (event.type === "message_deleted") {
+        setMessagesByDm((prev) => {
+          const existing = prev[event.dm_id];
+          if (!existing) return prev;
+          return { ...prev, [event.dm_id]: existing.filter((x) => x.id !== event.message_id) };
+        });
+      } else if (event.type === "reaction_update") {
+        setMessagesByDm((prev) => {
+          const existing = prev[event.dm_id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [event.dm_id]: existing.map((x) =>
+              x.id === event.message_id ? { ...x, reactions: event.reactions } : x,
+            ),
+          };
+        });
+      } else if (event.type === "guild_message") {
+        // guild-view.tsx handles appending this to the open channel's
+        // message list when that guild is the active view. Here we only
+        // care about the case guild-view.tsx can't see: a message landing
+        // in a guild that ISN'T currently open, so the rail's ping dot
+        // (which stays mounted regardless of which guild is active) still
+        // lights up — otherwise a background server would never show
+        // activity until you happened to click into it.
+        const isActiveGuild = view.kind === "guild" && view.guildId === event.guild_id;
+        if (!isActiveGuild && event.message.sender_id !== myId) {
+          setUnreadByGuild((prev) => ({
+            ...prev,
+            [event.guild_id]: (prev[event.guild_id] ?? 0) + 1,
+          }));
+        }
       }
     });
   }, [subscribe, myId, refreshFriends, refreshDms, sound, view, getToken]);
@@ -798,6 +1008,9 @@ export function ChatApp({
           guilds={guilds}
           activeGuildId={view.kind === "guild" ? view.guildId : null}
           compact={settings.compactSidebarIcons}
+          unreadGuildIds={
+            new Set(Object.entries(unreadByGuild).filter(([, n]) => n > 0).map(([id]) => id))
+          }
           onSelectGuild={openGuildView}
           onOpenCreateJoin={() => setCreateJoinOpen(true)}
         />
@@ -914,11 +1127,13 @@ export function ChatApp({
                   >
                     <span className="absolute inset-y-1 left-0 w-0.5 scale-y-0 rounded-full bg-[#F0A868] transition-transform group-data-[active=true]:scale-y-100" />
                     {settings.showAvatarsInMessages && (
-                      <Avatar
-                        seed={dm.other_user_id ?? label}
-                        label={label}
-                        size="sm"
-                      />
+                      <AvatarWithStatus status={statusOfDm(dm.other_user_id)} dotSize="sm">
+                        <Avatar
+                          seed={dm.other_user_id ?? label}
+                          label={label}
+                          size="sm"
+                        />
+                      </AvatarWithStatus>
                     )}
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline justify-between gap-2">
@@ -1017,6 +1232,7 @@ export function ChatApp({
             void refreshGuilds();
             openFriendsView();
           }}
+          onUnreadChanged={handleGuildUnreadChanged}
         />
       ) : (
       <div
@@ -1089,7 +1305,7 @@ export function ChatApp({
                           style={{ animationDelay: `${Math.min(i, 8) * 45}ms` }}
                           className="animate-rise-in flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5 transition-colors hover:border-[#2A2F3A]"
                         >
-                          <Avatar seed={f.user_id} label={label} />
+                          <AvatarWithProfile userId={f.user_id} label={label} />
                           <span className="min-w-0 flex-1 truncate text-sm text-[#E8EAED]">
                             {label}
                           </span>
@@ -1132,7 +1348,7 @@ export function ChatApp({
                           style={{ animationDelay: `${Math.min(i, 8) * 45}ms` }}
                           className="animate-rise-in flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B]/50 px-3 py-2.5"
                         >
-                          <Avatar seed={f.user_id} label={label} />
+                          <AvatarWithProfile userId={f.user_id} label={label} />
                           <span className="min-w-0 flex-1 truncate text-sm text-[#8B93A1]">
                             {label} — waiting for response
                           </span>
@@ -1167,7 +1383,7 @@ export function ChatApp({
                           style={{ animationDelay: `${Math.min(i, 12) * 35}ms` }}
                           className="animate-rise-in group flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-colors hover:border-[#1D2129] hover:bg-[#12151B]"
                         >
-                          <Avatar seed={f.user_id} label={label} />
+                          <AvatarWithProfile userId={f.user_id} label={label} />
                           <span className="min-w-0 flex-1 truncate text-sm text-[#E8EAED]">
                             {label}
                           </span>
@@ -1197,10 +1413,11 @@ export function ChatApp({
               >
                 <ChevronLeft className="size-5" />
               </button>
-              <Avatar
-                seed={activeDm?.other_user_id ?? activeLabel}
-                label={activeLabel}
-              />
+              {activeDm?.other_user_id ? (
+                <AvatarWithProfile userId={activeDm.other_user_id} label={activeLabel} />
+              ) : (
+                <Avatar seed={activeLabel} label={activeLabel} />
+              )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-semibold text-[#E8EAED]">
                   {activeLabel}
@@ -1282,8 +1499,8 @@ export function ChatApp({
                         className={`flex gap-2.5 ${settings.reduceMotion ? "" : "animate-rise-in"} ${mine ? "flex-row-reverse" : ""}`}
                       >
                         {!mine && settings.showAvatarsInMessages && (
-                          <Avatar
-                            seed={group.senderId}
+                          <AvatarWithProfile
+                            userId={group.senderId}
                             label={label}
                             size="sm"
                           />
@@ -1304,37 +1521,103 @@ export function ChatApp({
                                 </span>
                               )}
                               <div className="relative">
-                                <div
-                                  className={`whitespace-pre-wrap px-3.5 py-2 text-sm leading-relaxed break-words ${bubbleCorner} ${
-                                    mine
-                                      ? settings.showGradientBackgrounds
-                                        ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_6px_16px_-8px_rgba(240,168,104,0.4)]"
-                                        : "bg-[#F0A868] text-[#12151A]"
-                                      : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
-                                  }`}
-                                >
-                                  {m.content}
-                                </div>
-                                {/* Discord-style hover toolbar: copy is real
-                                    (navigator.clipboard); the rest are
-                                    honestly labeled as not-yet-wired rather
-                                    than faking functionality. */}
-                                <div
-                                  className={`pointer-events-none absolute -top-3 ${mine ? "right-2" : "left-2"} z-10 flex items-center gap-0.5 rounded-lg border border-[#2A2F3A] bg-[#12151B] p-0.5 opacity-0 shadow-[0_6px_16px_-6px_rgba(0,0,0,0.6)] transition-opacity group-hover/msg:pointer-events-auto group-hover/msg:opacity-100`}
-                                >
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleCopyMessage(m.id, m.content)}
-                                    title="Copy message"
-                                    className="flex size-6 items-center justify-center rounded-md text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                                {editingMessageId === m.id ? (
+                                  <div className={`w-64 rounded-2xl border border-[#F0A868]/40 bg-[#12151B] p-2 sm:w-80`}>
+                                    <textarea
+                                      autoFocus
+                                      value={editDraft}
+                                      onChange={(e) => setEditDraft(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" && !e.shiftKey) {
+                                          e.preventDefault();
+                                          void saveEditMessage(view.dmId, m.id);
+                                        } else if (e.key === "Escape") {
+                                          cancelEditMessage();
+                                        }
+                                      }}
+                                      rows={2}
+                                      className="w-full resize-none rounded-lg border border-[#2A2F3A] bg-[#0F1217] px-2.5 py-1.5 text-sm text-[#E8EAED] outline-none focus:border-[#F0A868]/50"
+                                    />
+                                    <div className="mt-1.5 flex justify-end gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={cancelEditMessage}
+                                        className="rounded-md px-2 py-1 text-xs text-[#8B93A1] hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                                      >
+                                        Cancel
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={editSaving || !editDraft.trim()}
+                                        onClick={() => void saveEditMessage(view.dmId, m.id)}
+                                        className="rounded-md bg-[#F0A868]/15 px-2 py-1 text-xs font-medium text-[#F0A868] hover:bg-[#F0A868]/25 disabled:opacity-50"
+                                      >
+                                        Save
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div
+                                    className={`whitespace-pre-wrap px-3.5 py-2 text-sm leading-relaxed break-words ${bubbleCorner} ${
+                                      mine
+                                        ? settings.showGradientBackgrounds
+                                          ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_6px_16px_-8px_rgba(240,168,104,0.4)]"
+                                          : "bg-[#F0A868] text-[#12151A]"
+                                        : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
+                                    }`}
                                   >
-                                    {copiedMessageId === m.id ? (
-                                      <CopyCheck className="size-3.5 text-[#4ADE80]" />
-                                    ) : (
-                                      <Copy className="size-3.5" />
+                                    {m.content}
+                                    {m.edited_at && (
+                                      <span className={`ml-1.5 text-[10px] italic ${mine ? "text-[#12151A]/60" : "text-[#8B93A1]"}`}>
+                                        (edited)
+                                      </span>
                                     )}
-                                  </button>
-                                </div>
+                                  </div>
+                                )}
+                                {/* Discord-style hover toolbar: copy, edit
+                                    (own messages), delete (own messages). */}
+                                {editingMessageId !== m.id && (
+                                  <div
+                                    className={`pointer-events-none absolute -top-3 ${mine ? "right-2" : "left-2"} z-10 flex items-center gap-0.5 rounded-lg border border-[#2A2F3A] bg-[#12151B] p-0.5 opacity-0 shadow-[0_6px_16px_-6px_rgba(0,0,0,0.6)] transition-opacity group-hover/msg:pointer-events-auto group-hover/msg:opacity-100`}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleCopyMessage(m.id, m.content)}
+                                      title="Copy message"
+                                      className="flex size-6 items-center justify-center rounded-md text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                                    >
+                                      {copiedMessageId === m.id ? (
+                                        <CopyCheck className="size-3.5 text-[#4ADE80]" />
+                                      ) : (
+                                        <Copy className="size-3.5" />
+                                      )}
+                                    </button>
+                                    {mine && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => startEditMessage(m)}
+                                          title="Edit message"
+                                          className="flex size-6 items-center justify-center rounded-md text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                                        >
+                                          <Pencil className="size-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setPendingDeleteMessage({ dmId: view.dmId, id: m.id })}
+                                          title="Delete message"
+                                          className="flex size-6 items-center justify-center rounded-md text-[#8B93A1] transition-colors hover:bg-[#EB5757]/15 hover:text-[#EB5757]"
+                                        >
+                                          <Trash2 className="size-3.5" />
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                                <ReactionBar
+                                  reactions={m.reactions}
+                                  onToggle={(emoji) => void handleToggleReaction(view.dmId, m.id, emoji)}
+                                />
                               </div>
                               {!mine && (
                                 <span
@@ -1525,6 +1808,16 @@ export function ChatApp({
           call-context.tsx only knows the peer's raw user id. */}
       <IncomingCallToast peerLabel={resolvePeerLabel(call.peerUserId)} />
       <CallPanel peerLabel={resolvePeerLabel(call.peerUserId)} />
+
+      <ConfirmModal
+        open={pendingDeleteMessage !== null}
+        title="Delete message?"
+        description="This can't be undone."
+        confirmLabel="Delete"
+        busy={deletingMessage}
+        onConfirm={() => void confirmDeleteMessage()}
+        onCancel={() => setPendingDeleteMessage(null)}
+      />
     </div>
   );
 }

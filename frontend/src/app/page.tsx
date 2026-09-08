@@ -4,6 +4,7 @@ import { SettingsProvider } from "@/lib/settings-context";
 import { RealtimeProvider } from "@/lib/realtime-context";
 import { CallProvider } from "@/lib/call-context";
 import { VoiceProvider } from "@/lib/voice-context";
+import { PresenceProvider } from "@/lib/presence-context";
 import { ChatApp } from "@/components/chat-app";
 
 // Real app: friends, DMs, realtime messaging, and Discord-style guilds
@@ -23,11 +24,13 @@ export default async function Home() {
   return (
     <SettingsProvider>
       <RealtimeProvider>
-        <CallProvider>
-          <VoiceProvider>
-            <ChatApp displayName={displayName} email={email} />
-          </VoiceProvider>
-        </CallProvider>
+        <PresenceProvider>
+          <CallProvider>
+            <VoiceProvider>
+              <ChatApp displayName={displayName} email={email} />
+            </VoiceProvider>
+          </CallProvider>
+        </PresenceProvider>
       </RealtimeProvider>
     </SettingsProvider>
   );

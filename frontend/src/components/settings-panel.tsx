@@ -37,6 +37,8 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { StatusDot } from "@/components/status-dot";
+import { usePresence } from "@/lib/presence-context";
 import {
   CATEGORIES,
   SETTINGS_CATALOG,
@@ -539,6 +541,9 @@ function CustomSettingBody({
     case "copyUserId":
       return <CopyUserIdControl myUserId={myUserId} />;
 
+    case "presenceAndProfile":
+      return <PresenceProfileControl />;
+
     case "manageSessions":
     case "twoFactorAuth":
     case "twoFactorAuthPrivacy":
@@ -725,6 +730,90 @@ function CopyUserIdControl({ myUserId }: { myUserId: string | null }) {
     >
       <Copy className="size-3.5" /> {copied ? "Copied!" : "Copy ID"}
     </Button>
+  );
+}
+
+// Inline presence-mode picker + quick profile-field editors, backed by the
+// real PATCH /me/profile + PUT /me/presence routes via presence-context.tsx.
+// This is the settings-panel surface for the same data profile-card.tsx
+// edits inline when you click your own avatar — same backend calls, just a
+// second entry point that lives where users expect account settings to be.
+const PRESENCE_MODES: { mode: "online" | "idle" | "dnd" | "invisible"; label: string }[] = [
+  { mode: "online", label: "Online" },
+  { mode: "idle", label: "Idle" },
+  { mode: "dnd", label: "Do Not Disturb" },
+  { mode: "invisible", label: "Invisible" },
+];
+
+function PresenceProfileControl() {
+  const { ownProfile, setPresenceMode, updateOwnProfile } = usePresence();
+  const [busyMode, setBusyMode] = useState<string | null>(null);
+  const [statusText, setStatusText] = useState(ownProfile?.status_text ?? "");
+  const [savingStatus, setSavingStatus] = useState(false);
+
+  useEffect(() => {
+    setStatusText(ownProfile?.status_text ?? "");
+  }, [ownProfile?.status_text]);
+
+  if (!ownProfile) {
+    return <p className="text-xs text-[#8B93A1]">Profile not available yet.</p>;
+  }
+
+  return (
+    <div className="max-w-sm space-y-3">
+      <div className="flex flex-wrap gap-1.5">
+        {PRESENCE_MODES.map((opt) => (
+          <button
+            key={opt.mode}
+            type="button"
+            disabled={busyMode !== null}
+            onClick={async () => {
+              setBusyMode(opt.mode);
+              try {
+                await setPresenceMode(opt.mode);
+              } finally {
+                setBusyMode(null);
+              }
+            }}
+            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors disabled:opacity-60 ${
+              ownProfile.presence_mode === opt.mode
+                ? "border-[#F0A868]/50 bg-[#F0A868]/15 text-[#F0A868]"
+                : "border-[#2A2F3A] text-[#C7CDD6] hover:border-[#3A4050] hover:bg-[#1B1F27]"
+            }`}
+          >
+            <StatusDot status={opt.mode === "invisible" ? "offline" : opt.mode} size="sm" />
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input
+          value={statusText}
+          onChange={(e) => setStatusText(e.target.value)}
+          placeholder="Custom status message"
+          maxLength={128}
+          className="h-8 flex-1 rounded-lg border border-[#2A2F3A] bg-[#0F1217]/80 px-2.5 text-xs text-[#E8EAED] placeholder:text-[#8B93A1]/60 outline-none focus:border-[#F0A868]/40"
+        />
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={savingStatus || statusText === (ownProfile.status_text ?? "")}
+          onClick={async () => {
+            setSavingStatus(true);
+            try {
+              await updateOwnProfile({ status_text: statusText });
+            } finally {
+              setSavingStatus(false);
+            }
+          }}
+        >
+          {savingStatus ? "Saving…" : "Save"}
+        </Button>
+      </div>
+      <p className="text-[11px] text-[#8B93A1]">
+        Click your own avatar anywhere in the app for the full profile card (bio, pronouns, accent + banner colors).
+      </p>
+    </div>
   );
 }
 

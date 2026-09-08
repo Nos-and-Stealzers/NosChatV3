@@ -113,6 +113,8 @@ export type DmSummary = {
   unread_count: number;
 };
 
+export type ReactionSummary = { emoji: string; count: number; reacted_by_me: boolean };
+
 export type Message = {
   id: string;
   dm_id: string;
@@ -120,6 +122,7 @@ export type Message = {
   content: string;
   created_at: string;
   edited_at: string | null;
+  reactions?: ReactionSummary[];
 };
 
 export function listDms(token: string) {
@@ -153,6 +156,83 @@ export function markDmRead(token: string, dmId: string) {
   return req<{ status: string }>(`/dms/${dmId}/read`, token, {
     method: "POST",
   });
+}
+
+export function editDmMessage(token: string, dmId: string, messageId: string, content: string) {
+  return req<Message>(`/dms/${dmId}/messages/${messageId}`, token, {
+    method: "PATCH",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function deleteDmMessage(token: string, dmId: string, messageId: string) {
+  return req<void>(`/dms/${dmId}/messages/${messageId}`, token, {
+    method: "DELETE",
+  });
+}
+
+export function toggleDmReaction(token: string, dmId: string, messageId: string, emoji: string) {
+  return req<ReactionSummary[]>(`/dms/${dmId}/messages/${messageId}/reactions`, token, {
+    method: "POST",
+    body: JSON.stringify({ emoji }),
+  });
+}
+
+// ---- Profiles + presence -------------------------------------------------
+// Mirrors backend/auth-service/src/profiles.rs. `status` is the *effective*
+// status everyone else sees (online/idle/dnd/offline — "invisible" never
+// leaks out). Own profile additionally exposes the raw `presence_mode`
+// (which may be "invisible") since that's the owner's actual stored
+// preference, needed to render the presence picker's selected state.
+
+export type PresenceStatus = "online" | "idle" | "dnd" | "offline";
+export type PresenceMode = "online" | "idle" | "dnd" | "invisible";
+
+export type PublicProfile = {
+  id: string;
+  username: string | null;
+  bio: string | null;
+  pronouns: string | null;
+  accent_color: string;
+  banner_color: string;
+  status_text: string | null;
+  status: PresenceStatus;
+};
+
+export type OwnProfile = PublicProfile & {
+  presence_mode: PresenceMode;
+};
+
+export function getOwnProfile(token: string) {
+  return req<OwnProfile>("/me/profile", token);
+}
+
+export function getPublicProfile(token: string, userId: string) {
+  return req<PublicProfile>(`/users/${userId}`, token);
+}
+
+export function updateProfile(
+  token: string,
+  patch: {
+    bio?: string;
+    pronouns?: string;
+    accent_color?: string;
+    banner_color?: string;
+    status_text?: string;
+  },
+) {
+  return req<OwnProfile>("/me/profile", token, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function setPresenceMode(token: string, mode: PresenceMode) {
+  return req<{ presence_mode: PresenceMode; status: PresenceStatus }>(
+    "/me/presence",
+    token,
+    { method: "PUT", body: JSON.stringify({ mode }) },
+  );
 }
 
 // ---- Sounds -------------------------------------------------------------
@@ -283,6 +363,7 @@ export type GuildMessage = {
   content: string;
   created_at: string;
   edited_at: string | null;
+  reactions?: ReactionSummary[];
 };
 
 export type Invite = {
@@ -424,6 +505,59 @@ export function sendGuildMessage(
     token,
     { method: "POST", body: JSON.stringify({ content }) },
   );
+}
+
+export function editGuildMessage(
+  token: string,
+  guildId: string,
+  channelId: string,
+  messageId: string,
+  content: string,
+) {
+  return req<GuildMessage>(
+    `/guilds/${guildId}/channels/${channelId}/messages/${messageId}`,
+    token,
+    { method: "PATCH", body: JSON.stringify({ content }) },
+  );
+}
+
+export function deleteGuildMessage(
+  token: string,
+  guildId: string,
+  channelId: string,
+  messageId: string,
+) {
+  return req<void>(
+    `/guilds/${guildId}/channels/${channelId}/messages/${messageId}`,
+    token,
+    { method: "DELETE" },
+  );
+}
+
+export function toggleGuildReaction(
+  token: string,
+  guildId: string,
+  channelId: string,
+  messageId: string,
+  emoji: string,
+) {
+  return req<ReactionSummary[]>(
+    `/guilds/${guildId}/channels/${channelId}/messages/${messageId}/reactions`,
+    token,
+    { method: "POST", body: JSON.stringify({ emoji }) },
+  );
+}
+
+export type GuildUnreadEntry = { channel_id: string; unread_count: number };
+
+export function markGuildChannelRead(token: string, guildId: string, channelId: string) {
+  return req<{ status: string }>(`/guilds/${guildId}/channels/${channelId}/read`, token, {
+    method: "POST",
+  });
+}
+
+export function getGuildUnread(token: string, guildId: string) {
+  return req<GuildUnreadEntry[]>(`/guilds/${guildId}/unread`, token);
 }
 
 // ---- Roles ------------------------------------------------------------

@@ -30,6 +30,7 @@ import {
   FolderPlus,
   Trash2,
   X,
+  Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -47,6 +48,11 @@ import {
   deleteGuildChannel,
   leaveGuild,
   deleteGuild,
+  markGuildChannelRead,
+  getGuildUnread,
+  editGuildMessage,
+  deleteGuildMessage,
+  toggleGuildReaction,
   type GuildDetail,
   type GuildChannel,
   type GuildMessage,
@@ -57,6 +63,10 @@ import {
 import { useRealtime } from "@/lib/realtime-context";
 import { useVoice } from "@/lib/voice-context";
 import { Users } from "lucide-react";
+import { ConfirmModal } from "@/components/confirm-modal";
+import { ReactionBar } from "@/components/reaction-bar";
+import { usePresence } from "@/lib/presence-context";
+import { AvatarWithStatus } from "@/components/status-dot";
 
 function Avatar({
   seed,
@@ -117,16 +127,22 @@ export function GuildView({
   onOpenSettings,
   onOpenInvite,
   onLeftGuild,
+  onUnreadChanged,
 }: {
   guildId: string;
   myId: string | null;
   onOpenSettings: () => void;
   onOpenInvite: () => void;
   onLeftGuild?: () => void;
+  // Notifies the parent (chat-app.tsx) whenever this guild's total unread
+  // count changes, so the guild-rail ping dot stays accurate even though
+  // the rail lives outside this component's subtree.
+  onUnreadChanged?: (guildId: string, totalUnread: number) => void;
 }) {
   const { getToken } = useAuth();
   const { subscribe } = useRealtime();
   const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic } = useVoice();
+  const { statusOf, fetchProfile } = usePresence();
 
   const [detail, setDetail] = useState<GuildDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -170,6 +186,43 @@ export function GuildView({
   const [leavingOrDeleting, setLeavingOrDeleting] = useState(false);
   const [leaveOrDeleteError, setLeaveOrDeleteError] = useState<string | null>(null);
 
+  // Inline edit state for guild text messages — same pattern as chat-app.tsx's
+  // DM message editing.
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const [pendingDeleteMessage, setPendingDeleteMessage] = useState<{ channelId: string; id: string } | null>(null);
+  const [deletingMessage, setDeletingMessage] = useState(false);
+
+  // channel_id -> unread count, from GET /guilds/:id/unread. Only entries
+  // with unread_count > 0 are returned by the backend, so any channel not
+  // present here is implicitly read.
+  const [unreadByChannel, setUnreadByChannel] = useState<Record<string, number>>({});
+
+  const refreshUnread = useCallback(async () => {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      const entries = await getGuildUnread(token, guildId);
+      const map: Record<string, number> = {};
+      for (const e of entries) map[e.channel_id] = e.unread_count;
+      setUnreadByChannel(map);
+    } catch {
+      // Non-fatal — unread badges just won't show this round.
+    }
+  }, [getToken, guildId]);
+
+  useEffect(() => {
+    void refreshUnread();
+  }, [refreshUnread]);
+
+  // Report the total across all channels to the parent whenever it changes,
+  // so the guild-rail ping dot (rendered outside this subtree) stays live.
+  useEffect(() => {
+    const total = Object.values(unreadByChannel).reduce((a, b) => a + b, 0);
+    onUnreadChanged?.(guildId, total);
+  }, [unreadByChannel, guildId, onUnreadChanged]);
+
   const refreshDetail = useCallback(async () => {
     const token = await getToken();
     if (!token) return;
@@ -205,6 +258,15 @@ export function GuildView({
           map[m.user_id] = m.nickname || m.username || `user-${m.user_id.slice(0, 8)}`;
         }
         setMemberNames(map);
+        // Best-effort presence snapshot: guild members aren't necessarily
+        // friends (the only cohort presence_update broadcasts reach), so
+        // fetch each member's real public profile once to seed the status
+        // dot with an accurate initial value. Live updates after this
+        // still only arrive for actual friends — a known limitation, not
+        // fabricated data.
+        for (const m of members) {
+          void fetchProfile(m.user_id);
+        }
       } catch {
         // Non-fatal — names just fall back to raw ids below.
       }
@@ -212,7 +274,7 @@ export function GuildView({
     return () => {
       cancelled = true;
     };
-  }, [getToken, guildId]);
+  }, [getToken, guildId, fetchProfile]);
 
   function nameFor(userId: string): string {
     if (userId === myId) return "You";
@@ -237,6 +299,15 @@ export function GuildView({
       try {
         const msgs = await listGuildMessages(token, guildId, channelId);
         setMessagesByChannel((prev) => ({ ...prev, [channelId]: msgs }));
+        // Opening a text channel marks it read, mirroring the DM markDmRead
+        // trigger in chat-app.tsx.
+        await markGuildChannelRead(token, guildId, channelId).catch(() => {});
+        setUnreadByChannel((prev) => {
+          if (!(channelId in prev)) return prev;
+          const next = { ...prev };
+          delete next[channelId];
+          return next;
+        });
       } catch (e) {
         setLoadError(e instanceof Error ? e.message : "Failed to load messages");
       }
@@ -251,6 +322,40 @@ export function GuildView({
           const existing = prev[m.channel_id] ?? [];
           if (existing.some((x) => x.id === m.id)) return prev;
           return { ...prev, [m.channel_id]: [...existing, m] };
+        });
+        // A new message landed in some channel of this guild. If it's the
+        // channel currently open, it's implicitly read (no badge); for any
+        // other channel, refetch the real unread counts from the backend
+        // rather than guessing/incrementing client-side.
+        if (m.channel_id !== activeChannelId) {
+          void refreshUnread();
+        }
+      } else if (event.type === "guild_message_edited" && event.guild_id === guildId) {
+        const m = event.message;
+        setMessagesByChannel((prev) => {
+          const existing = prev[m.channel_id];
+          if (!existing) return prev;
+          return { ...prev, [m.channel_id]: existing.map((x) => (x.id === m.id ? m : x)) };
+        });
+      } else if (event.type === "guild_message_deleted" && event.guild_id === guildId) {
+        setMessagesByChannel((prev) => {
+          const existing = prev[event.channel_id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [event.channel_id]: existing.filter((x) => x.id !== event.message_id),
+          };
+        });
+      } else if (event.type === "guild_reaction_update" && event.guild_id === guildId) {
+        setMessagesByChannel((prev) => {
+          const existing = prev[event.channel_id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [event.channel_id]: existing.map((x) =>
+              x.id === event.message_id ? { ...x, reactions: event.reactions } : x,
+            ),
+          };
         });
       } else if (event.type === "voice_channel_state") {
         setVoicePresence((prev) => ({ ...prev, [event.channel_id]: event.user_ids }));
@@ -267,7 +372,7 @@ export function GuildView({
         }));
       }
     });
-  }, [subscribe, guildId]);
+  }, [subscribe, guildId, activeChannelId, refreshUnread]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -404,6 +509,71 @@ export function GuildView({
     }
   }
 
+  function startEditMessage(m: GuildMessage) {
+    setEditingMessageId(m.id);
+    setEditDraft(m.content);
+  }
+
+  function cancelEditMessage() {
+    setEditingMessageId(null);
+    setEditDraft("");
+  }
+
+  async function saveEditMessage(channelId: string, messageId: string) {
+    const content = editDraft.trim();
+    if (!content) return;
+    setEditSaving(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const updated = await editGuildMessage(token, guildId, channelId, messageId, content);
+      setMessagesByChannel((prev) => ({
+        ...prev,
+        [channelId]: (prev[channelId] ?? []).map((x) => (x.id === messageId ? updated : x)),
+      }));
+      setEditingMessageId(null);
+      setEditDraft("");
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to edit message");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function confirmDeleteMessage() {
+    if (!pendingDeleteMessage) return;
+    const { channelId, id } = pendingDeleteMessage;
+    setDeletingMessage(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await deleteGuildMessage(token, guildId, channelId, id);
+      setMessagesByChannel((prev) => ({
+        ...prev,
+        [channelId]: (prev[channelId] ?? []).filter((x) => x.id !== id),
+      }));
+      setPendingDeleteMessage(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to delete message");
+    } finally {
+      setDeletingMessage(false);
+    }
+  }
+
+  async function handleToggleReaction(channelId: string, messageId: string, emoji: string) {
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const reactions = await toggleGuildReaction(token, guildId, channelId, messageId, emoji);
+      setMessagesByChannel((prev) => ({
+        ...prev,
+        [channelId]: (prev[channelId] ?? []).map((x) => (x.id === messageId ? { ...x, reactions } : x)),
+      }));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to react");
+    }
+  }
+
   if (!detail) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-[#8B93A1]">
@@ -414,6 +584,7 @@ export function GuildView({
 
   const myPerms = detail.my_permissions;
   const canManageGuild = hasPermission(myPerms, PERMISSIONS.MANAGE_GUILD);
+  const canManageMessages = hasPermission(myPerms, PERMISSIONS.MANAGE_MESSAGES);
   const groups = groupChannels(detail.categories, detail.channels);
   const activeMessages = activeChannel ? (messagesByChannel[activeChannel.id] ?? []) : [];
   const inVoiceChannel = voice.channelId === activeChannel?.id;
@@ -551,6 +722,7 @@ export function GuildView({
                     {group.channels.map((ch) => {
                       const isActive = activeChannelId === ch.id;
                       const presentUsers = voicePresence[ch.id] ?? [];
+                      const channelUnread = unreadByChannel[ch.id] ?? 0;
                       return (
                         <div key={ch.id} className="group/channel">
                           <div
@@ -566,7 +738,16 @@ export function GuildView({
                               ) : (
                                 <Volume2 className="size-4 flex-none text-[#8B93A1]/70" />
                               )}
-                              <span className="truncate">{ch.name}</span>
+                              <span
+                                className={`truncate ${channelUnread > 0 && !isActive ? "font-semibold text-[#E8EAED]" : ""}`}
+                              >
+                                {ch.name}
+                              </span>
+                              {channelUnread > 0 && !isActive && (
+                                <span className="ml-auto flex h-4 min-w-4 flex-none items-center justify-center rounded-full bg-[#EB5757] px-1 text-[9px] font-bold text-white">
+                                  {channelUnread > 99 ? "99+" : channelUnread}
+                                </span>
+                              )}
                             </button>
                             {canManageGuild && (
                               <button
@@ -666,24 +847,98 @@ export function GuildView({
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {activeMessages.map((m) => (
-                    <div key={m.id} className="animate-rise-in flex gap-2.5">
-                      <Avatar seed={m.sender_id} label={nameFor(m.sender_id)} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-baseline gap-2">
-                          <span className="text-sm font-semibold text-[#E8EAED]">
-                            {nameFor(m.sender_id)}
-                          </span>
-                          <span className="font-mono text-[10px] text-[#8B93A1]">
-                            {clockTime(m.created_at)}
-                          </span>
+                  {activeMessages.map((m) => {
+                    const mine = m.sender_id === myId;
+                    const canDelete = mine || canManageMessages;
+                    return (
+                      <div key={m.id} className="group/msg animate-rise-in flex gap-2.5">
+                        <AvatarWithStatus status={statusOf(m.sender_id)}>
+                          <Avatar seed={m.sender_id} label={nameFor(m.sender_id)} />
+                        </AvatarWithStatus>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-sm font-semibold text-[#E8EAED]">
+                              {nameFor(m.sender_id)}
+                            </span>
+                            <span className="font-mono text-[10px] text-[#8B93A1]">
+                              {clockTime(m.created_at)}
+                            </span>
+                            {m.edited_at && (
+                              <span className="text-[10px] italic text-[#8B93A1]">(edited)</span>
+                            )}
+                            {(mine || canDelete) && editingMessageId !== m.id && (
+                              <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">
+                                {mine && (
+                                  <button
+                                    type="button"
+                                    onClick={() => startEditMessage(m)}
+                                    title="Edit message"
+                                    className="flex size-5 items-center justify-center rounded-md text-[#8B93A1] hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                                  >
+                                    <Pencil className="size-3" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setPendingDeleteMessage({ channelId: activeChannel.id, id: m.id })
+                                  }
+                                  title="Delete message"
+                                  className="flex size-5 items-center justify-center rounded-md text-[#8B93A1] hover:bg-[#EB5757]/15 hover:text-[#EB5757]"
+                                >
+                                  <Trash2 className="size-3" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          {editingMessageId === m.id ? (
+                            <div className="mt-1 w-full max-w-lg rounded-xl border border-[#F0A868]/40 bg-[#12151B] p-2">
+                              <textarea
+                                autoFocus
+                                value={editDraft}
+                                onChange={(e) => setEditDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && !e.shiftKey) {
+                                    e.preventDefault();
+                                    void saveEditMessage(activeChannel.id, m.id);
+                                  } else if (e.key === "Escape") {
+                                    cancelEditMessage();
+                                  }
+                                }}
+                                rows={2}
+                                className="w-full resize-none rounded-lg border border-[#2A2F3A] bg-[#0F1217] px-2.5 py-1.5 text-sm text-[#E8EAED] outline-none focus:border-[#F0A868]/50"
+                              />
+                              <div className="mt-1.5 flex justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={cancelEditMessage}
+                                  className="rounded-md px-2 py-1 text-xs text-[#8B93A1] hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={editSaving || !editDraft.trim()}
+                                  onClick={() => void saveEditMessage(activeChannel.id, m.id)}
+                                  className="rounded-md bg-[#F0A868]/15 px-2 py-1 text-xs font-medium text-[#F0A868] hover:bg-[#F0A868]/25 disabled:opacity-50"
+                                >
+                                  Save
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="whitespace-pre-wrap text-sm leading-relaxed break-words text-[#C7CDD6]">
+                              {m.content}
+                            </p>
+                          )}
+                          <ReactionBar
+                            reactions={m.reactions}
+                            onToggle={(emoji) => void handleToggleReaction(activeChannel.id, m.id, emoji)}
+                          />
                         </div>
-                        <p className="whitespace-pre-wrap text-sm leading-relaxed break-words text-[#C7CDD6]">
-                          {m.content}
-                        </p>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -739,7 +994,9 @@ export function GuildView({
                               key={m.user_id}
                               className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-[#1B1F27]"
                             >
-                              <Avatar seed={m.user_id} label={label} size="sm" />
+                              <AvatarWithStatus status={statusOf(m.user_id)} dotSize="sm">
+                                <Avatar seed={m.user_id} label={label} size="sm" />
+                              </AvatarWithStatus>
                               <span className="min-w-0 flex-1 truncate text-sm text-[#C7CDD6]">
                                 {m.user_id === myId ? "You" : label}
                               </span>
@@ -968,6 +1225,16 @@ export function GuildView({
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={pendingDeleteMessage !== null}
+        title="Delete message?"
+        description="This can't be undone."
+        confirmLabel="Delete"
+        busy={deletingMessage}
+        onConfirm={() => void confirmDeleteMessage()}
+        onCancel={() => setPendingDeleteMessage(null)}
+      />
     </div>
   );
 }
