@@ -462,8 +462,11 @@ export function ChatApp({
             </span>
           )}
         </button>
-        <div className="mt-auto flex flex-col items-center gap-1.5">
+        <div className="mt-auto flex flex-col items-center gap-1">
           <SignalDot connected={connected} />
+          <span className="font-mono text-[8px] uppercase tracking-[0.15em] text-[#8B93A1]/60">
+            {connected ? "on air" : "off air"}
+          </span>
         </div>
       </div>
 
@@ -504,7 +507,7 @@ export function ChatApp({
           )}
         </button>
 
-        <div className="mt-4 flex-1 overflow-y-auto px-2 pb-3">
+        <div className="noschat-scroll mt-4 flex-1 overflow-y-auto px-2 pb-3">
           <p className="px-2.5 pb-1.5 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
             Direct Messages
           </p>
@@ -637,7 +640,7 @@ export function ChatApp({
                 Friends
               </span>
             </div>
-            <div className="flex-1 overflow-y-auto px-4 py-6 md:px-6">
+            <div className="noschat-scroll flex-1 overflow-y-auto px-4 py-6 md:px-6">
               <form
                 onSubmit={handleAddFriend}
                 className="mb-8 flex max-w-md gap-2"
@@ -792,7 +795,7 @@ export function ChatApp({
               </div>
             </div>
 
-            <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5 md:px-6">
+            <div ref={scrollRef} className="noschat-scroll flex-1 overflow-y-auto px-4 py-5 md:px-6">
               {activeGroups.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
                   <Avatar
@@ -841,9 +844,9 @@ export function ChatApp({
                               <div
                                 className={`whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm leading-relaxed break-words ${
                                   mine
-                                    ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A]"
-                                    : "bg-[#1E232C] text-[#E8EAED]"
-                                } ${mi === 0 ? "" : ""}`}
+                                    ? "bg-gradient-to-b from-[#F3B57E] to-[#EB9A50] text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset,0_6px_16px_-8px_rgba(240,168,104,0.4)]"
+                                    : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
+                                }`}
                               >
                                 {m.content}
                               </div>

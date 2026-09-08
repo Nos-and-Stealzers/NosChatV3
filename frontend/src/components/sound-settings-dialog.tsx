@@ -1,6 +1,7 @@
 "use client";
 
-import { X } from "lucide-react";
+import { useState } from "react";
+import { Check, Play, Upload, Volume2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   MESSAGE_PRESETS,
@@ -32,54 +33,66 @@ export function SoundSettingsDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-[2px]"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-6 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.7)]"
+        className="noschat-grain animate-rise-in relative w-full max-w-md overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-6 shadow-[0_0_0_1px_rgba(240,168,104,0.06),0_24px_60px_-20px_rgba(0,0,0,0.75),0_10px_30px_-10px_rgba(240,168,104,0.10)] before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:z-[1] before:h-px before:bg-gradient-to-r before:from-transparent before:via-white/20 before:to-transparent"
       >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-[#E8EAED]">
-            Sound Settings
-          </h2>
-          <Button size="icon-sm" variant="ghost" onClick={onClose}>
+        <div className="relative z-[1] mb-5 flex items-start justify-between">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#8B93A1]/70">
+              Preferences
+            </p>
+            <h2 className="flex items-center gap-2 font-display text-2xl italic text-[#E8EAED]">
+              <Volume2 className="size-5 not-italic text-[#F0A868]" />
+              Sound
+            </h2>
+          </div>
+          <Button size="icon-sm" variant="ghost" onClick={onClose} title="Close">
             <X className="size-4" />
           </Button>
         </div>
 
-        {sound.loading && (
-          <p className="mb-3 text-xs text-[#8B93A1]">Loading…</p>
-        )}
-        {sound.error && (
-          <p className="mb-3 text-xs text-[#EB5757]">{sound.error}</p>
-        )}
+        <div className="relative z-[1] space-y-5">
+          {sound.loading && (
+            <p className="font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+              Loading…
+            </p>
+          )}
+          {sound.error && (
+            <p className="rounded-lg border border-[#EB5757]/25 bg-[#EB5757]/10 px-3 py-2 text-xs text-[#EB5757]">
+              {sound.error}
+            </p>
+          )}
 
-        <SlotEditor
-          label="Message Beep"
-          presets={MESSAGE_PRESETS}
-          current={sound.sounds?.message.preset ?? null}
-          hasCustom={sound.sounds?.message.has_custom ?? false}
-          onChoose={(p) => void sound.choosePreset("message", p)}
-          onUpload={(f) => void sound.uploadCustom("message", f)}
-          onPreview={() => void sound.play("message")}
-        />
+          <SlotEditor
+            label="Message Beep"
+            presets={MESSAGE_PRESETS}
+            current={sound.sounds?.message.preset ?? null}
+            hasCustom={sound.sounds?.message.has_custom ?? false}
+            onChoose={(p) => void sound.choosePreset("message", p)}
+            onUpload={(f) => void sound.uploadCustom("message", f)}
+            onPreview={() => void sound.play("message")}
+          />
 
-        <div className="my-4 h-px bg-[#2A2F3A]" />
+          <div className="h-px bg-gradient-to-r from-transparent via-[#2A2F3A] to-transparent" />
 
-        <SlotEditor
-          label="Ringtone"
-          presets={RINGTONE_PRESETS}
-          current={sound.sounds?.ringtone.preset ?? null}
-          hasCustom={sound.sounds?.ringtone.has_custom ?? false}
-          onChoose={(p) => void sound.choosePreset("ringtone", p)}
-          onUpload={(f) => void sound.uploadCustom("ringtone", f)}
-          onPreview={() => void sound.play("ringtone")}
-        />
+          <SlotEditor
+            label="Ringtone"
+            presets={RINGTONE_PRESETS}
+            current={sound.sounds?.ringtone.preset ?? null}
+            hasCustom={sound.sounds?.ringtone.has_custom ?? false}
+            onChoose={(p) => void sound.choosePreset("ringtone", p)}
+            onUpload={(f) => void sound.uploadCustom("ringtone", f)}
+            onPreview={() => void sound.play("ringtone")}
+          />
 
-        <p className="mt-5 text-xs text-[#8B93A1]/70">
-          Custom uploads override the preset until you pick a preset again.
-        </p>
+          <p className="text-xs leading-relaxed text-[#8B93A1]/70">
+            Custom uploads override the preset until you pick a preset again.
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -102,13 +115,25 @@ function SlotEditor({
   onUpload: (file: File) => void;
   onPreview: () => void;
 }) {
+  const [uploading, setUploading] = useState(false);
+
+  async function handleUpload(file: File) {
+    setUploading(true);
+    try {
+      await onUpload(file);
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <div>
       <div className="mb-2 flex items-center justify-between">
         <p className="font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
           {label}
         </p>
-        <Button size="sm" variant="ghost" onClick={onPreview}>
+        <Button size="sm" variant="ghost" onClick={onPreview} className="gap-1.5">
+          <Play className="size-3" />
           Preview
         </Button>
       </div>
@@ -123,15 +148,28 @@ function SlotEditor({
             {PRESET_LABELS[p]}
           </button>
         ))}
-        <label className="cursor-pointer rounded-lg border border-dashed border-[#2A2F3A] px-3 py-1.5 text-xs text-[#8B93A1] transition-colors hover:border-[#F0A868]/40 hover:text-[#F0A868]">
-          {hasCustom ? "Custom uploaded ✓" : "Upload custom…"}
+        <label
+          data-active={hasCustom}
+          className="group flex cursor-pointer items-center gap-1.5 rounded-lg border border-dashed border-[#2A2F3A] px-3 py-1.5 text-xs text-[#8B93A1] transition-colors hover:border-[#F0A868]/40 hover:text-[#F0A868] data-[active=true]:border-solid data-[active=true]:border-[#F0A868] data-[active=true]:bg-[#F0A868]/10 data-[active=true]:text-[#F0A868]"
+        >
+          {hasCustom ? (
+            <>
+              <Check className="size-3" /> Custom uploaded
+            </>
+          ) : (
+            <>
+              <Upload className="size-3" />
+              {uploading ? "Uploading…" : "Upload custom…"}
+            </>
+          )}
           <input
             type="file"
             accept="audio/*"
             className="hidden"
+            disabled={uploading}
             onChange={(e) => {
               const file = e.target.files?.[0];
-              if (file) onUpload(file);
+              if (file) void handleUpload(file);
               e.target.value = "";
             }}
           />
