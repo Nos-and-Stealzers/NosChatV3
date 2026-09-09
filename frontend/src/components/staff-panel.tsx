@@ -254,7 +254,7 @@ export function StaffPanel({ open, onClose }: { open: boolean; onClose: () => vo
                     {users.map((u) => (
                       <div
                         key={u.id}
-                        className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
+                        className="noschat-hover-lift flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
                       >
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm text-[#E8EAED]">
@@ -319,7 +319,7 @@ export function StaffPanel({ open, onClose }: { open: boolean; onClose: () => vo
                     {guilds.map((g) => (
                       <div
                         key={g.id}
-                        className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
+                        className="noschat-hover-lift flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
                       >
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm text-[#E8EAED]">{g.name}</p>
