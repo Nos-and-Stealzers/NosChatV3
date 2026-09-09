@@ -4,6 +4,7 @@ import { SettingsProvider } from "@/lib/settings-context";
 import { RealtimeProvider } from "@/lib/realtime-context";
 import { CallProvider } from "@/lib/call-context";
 import { VoiceProvider } from "@/lib/voice-context";
+import { DmVoiceProvider } from "@/lib/dm-voice-context";
 import { PresenceProvider } from "@/lib/presence-context";
 import { ContextMenuProvider } from "@/lib/context-menu";
 import { AdminProvider } from "@/lib/admin-context";
@@ -29,11 +30,13 @@ export default async function Home() {
         <PresenceProvider>
           <CallProvider>
             <VoiceProvider>
-              <ContextMenuProvider>
-                <AdminProvider>
-                  <ChatApp displayName={displayName} email={email} />
-                </AdminProvider>
-              </ContextMenuProvider>
+              <DmVoiceProvider>
+                <ContextMenuProvider>
+                  <AdminProvider>
+                    <ChatApp displayName={displayName} email={email} />
+                  </AdminProvider>
+                </ContextMenuProvider>
+              </DmVoiceProvider>
             </VoiceProvider>
           </CallProvider>
         </PresenceProvider>

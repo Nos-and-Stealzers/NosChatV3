@@ -109,6 +109,31 @@ export type RealtimeEvent =
       channel_id: string;
       from: string;
       candidate: RTCIceCandidateInit;
+    }
+  // --- Group-DM voice/video call presence + WebRTC mesh signaling -------
+  // Exact parallel of the guild voice_* events above, scoped to a group
+  // DM instead of a guild voice channel — see ws.rs's DmVoice* handlers.
+  | { type: "dm_voice_channel_state"; dm_id: string; user_ids: string[] }
+  | { type: "dm_voice_user_joined"; dm_id: string; user_id: string }
+  | { type: "dm_voice_user_left"; dm_id: string; user_id: string }
+  | { type: "dm_voice_screen_share_state"; dm_id: string; user_id: string; sharing: boolean }
+  | {
+      type: "dm_voice_offer";
+      dm_id: string;
+      from: string;
+      sdp: RTCSessionDescriptionInit;
+    }
+  | {
+      type: "dm_voice_answer";
+      dm_id: string;
+      from: string;
+      sdp: RTCSessionDescriptionInit;
+    }
+  | {
+      type: "dm_voice_ice_candidate";
+      dm_id: string;
+      from: string;
+      candidate: RTCIceCandidateInit;
     };
 
 // Client->server call-signaling shapes sendCallSignal accepts — mirrors the
@@ -138,6 +163,22 @@ export type GuildVoiceSignal =
       candidate: RTCIceCandidateInit;
     };
 
+// Client->server group-DM voice/video signaling shapes sendDmVoiceSignal
+// accepts — exact parallel of GuildVoiceSignal, mirrors ws.rs's DmVoice*
+// ClientEvent variants.
+export type DmVoiceSignal =
+  | { type: "dm_voice_join"; dm_id: string }
+  | { type: "dm_voice_leave"; dm_id: string }
+  | { type: "dm_voice_screen_share_state"; dm_id: string; sharing: boolean }
+  | { type: "dm_voice_offer"; dm_id: string; to: string; sdp: RTCSessionDescriptionInit }
+  | { type: "dm_voice_answer"; dm_id: string; to: string; sdp: RTCSessionDescriptionInit }
+  | {
+      type: "dm_voice_ice_candidate";
+      dm_id: string;
+      to: string;
+      candidate: RTCIceCandidateInit;
+    };
+
 type Listener = (event: RealtimeEvent) => void;
 
 type RealtimeContextValue = {
@@ -160,6 +201,8 @@ type RealtimeContextValue = {
   // (join/leave/offer/answer/ICE) up the same socket. Same no-op-if-closed
   // semantics as sendCallSignal/sendTyping.
   sendGuildSignal: (signal: GuildVoiceSignal) => void;
+  // Same pattern as sendGuildSignal, for group-DM voice/video calls.
+  sendDmVoiceSignal: (signal: DmVoiceSignal) => void;
   // --- Developer-settings-gated debug surface --------------------------
   // Real state pulled straight from the live socket, exposed for the
   // Settings panel's WebSocket debug overlay (Developer category).
@@ -238,6 +281,13 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const sendDmVoiceSignal = useCallback((signal: DmVoiceSignal) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(signal));
+    }
+  }, []);
+
   useEffect(() => {
     stoppedRef.current = false;
 
@@ -310,6 +360,7 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
         sendGuildTyping,
         sendCallSignal,
         sendGuildSignal,
+        sendDmVoiceSignal,
         reconnectCount,
         lastEventType,
         lastEventAt,

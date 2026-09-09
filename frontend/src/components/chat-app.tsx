@@ -77,11 +77,13 @@ import { NewGroupDmModal } from "@/components/new-group-dm-modal";
 import { useRealtime } from "@/lib/realtime-context";
 import { useSoundSettings } from "@/lib/use-sound-settings";
 import { useCall } from "@/lib/call-context";
+import { useDmVoice } from "@/lib/dm-voice-context";
 import { useSettings } from "@/lib/settings-context";
 import { SettingsPanel } from "@/components/settings-panel";
 import { StaffPanel } from "@/components/staff-panel";
 import { IncomingCallToast } from "@/components/incoming-call-toast";
 import { CallPanel } from "@/components/call-panel";
+import { DmGroupCallPanel } from "@/components/dm-group-call-panel";
 import { GuildRail } from "@/components/guild-rail";
 import { CreateJoinGuildModal } from "@/components/create-join-guild-modal";
 import { GuildView } from "@/components/guild-view";
@@ -388,6 +390,7 @@ export function ChatApp({
   }
   const sound = useSoundSettings();
   const { call, startCall, webrtcDebug } = useCall();
+  const { dmVoice, joinDmVoice } = useDmVoice();
   const { settings } = useSettings();
 
   const [myId, setMyId] = useState<string | null>(null);
@@ -1711,6 +1714,24 @@ export function ChatApp({
                     <Button
                       size="icon-sm"
                       variant="ghost"
+                      disabled={!connected || dmVoice.dmId !== null}
+                      onClick={() => void joinDmVoice(view.dmId, false)}
+                      title="Start group voice call"
+                    >
+                      <Phone className="size-4" />
+                    </Button>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      disabled={!connected || dmVoice.dmId !== null}
+                      onClick={() => void joinDmVoice(view.dmId, true)}
+                      title="Start group video call"
+                    >
+                      <Video className="size-4" />
+                    </Button>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
                       onClick={() => void handleLeaveGroup()}
                       title="Leave group"
                       className="hover:text-[#EB5757]"
@@ -2219,6 +2240,7 @@ export function ChatApp({
           call-context.tsx only knows the peer's raw user id. */}
       <IncomingCallToast peerLabel={resolvePeerLabel(call.peerUserId)} />
       <CallPanel peerLabel={resolvePeerLabel(call.peerUserId)} />
+      <DmGroupCallPanel dmId={dmVoice.dmId} nameFor={resolvePeerLabel} myLabel={displayName} />
 
       <ConfirmModal
         open={pendingDeleteMessage !== null}
