@@ -185,6 +185,8 @@ function VoiceTile({
   isLocal = false,
   micMuted = false,
   deafened = false,
+  spotlight = false,
+  screenSharing = false,
 }: {
   seed: string;
   label: string;
@@ -192,6 +194,8 @@ function VoiceTile({
   isLocal?: boolean;
   micMuted?: boolean;
   deafened?: boolean;
+  spotlight?: boolean;
+  screenSharing?: boolean;
 }) {
   const speaking = useIsSpeaking(stream, micMuted || (deafened && !isLocal));
   const hasVideo = !!stream?.getVideoTracks().length;
@@ -199,7 +203,7 @@ function VoiceTile({
   return (
     <div
       data-speaking={speaking}
-      className="group relative flex aspect-video min-h-[140px] flex-col items-center justify-center overflow-hidden rounded-xl border border-[#2A2F3A] bg-[#12151B] shadow-[0_1px_0_rgba(255,255,255,0.03)_inset] ring-2 ring-transparent transition-all duration-150 data-[speaking=true]:border-[#4ADE80]/60 data-[speaking=true]:ring-[#4ADE80]/70 data-[speaking=true]:shadow-[0_0_0_3px_rgba(74,222,128,0.15)]"
+      className={`group relative flex ${spotlight ? "h-full w-full" : "aspect-video min-h-[140px]"} flex-col items-center justify-center overflow-hidden rounded-xl border border-[#2A2F3A] bg-[#12151B] shadow-[0_1px_0_rgba(255,255,255,0.03)_inset] ring-2 ring-transparent transition-all duration-150 data-[speaking=true]:border-[#4ADE80]/60 data-[speaking=true]:ring-[#4ADE80]/70 data-[speaking=true]:shadow-[0_0_0_3px_rgba(74,222,128,0.15)]`}
     >
       {hasVideo && stream ? (
         // eslint-disable-next-line jsx-a11y/media-has-caption -- voice call video, no captions applicable
@@ -245,6 +249,11 @@ function VoiceTile({
           <Mic className="size-3.5 flex-none text-[#8B93A1]" />
         )}
         <span className="max-w-[10rem] truncate text-xs font-medium text-[#E8EAED]">{label}</span>
+        {screenSharing && (
+          <span className="flex items-center gap-1 rounded-full bg-[#4ADE80]/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-[#4ADE80]">
+            <ScreenShare className="size-2.5" /> Live
+          </span>
+        )}
       </div>
     </div>
   );
@@ -1742,28 +1751,98 @@ export function GuildView({
                     avatar-with-speaking-ring per person, auto-fitting the
                     available space instead of a fixed column count. */}
                 <div className="noschat-scroll flex-1 overflow-y-auto p-4 pb-28">
-                  <div
-                    className="grid h-full auto-rows-fr gap-3"
-                    style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}
-                  >
-                    <VoiceTile
-                      seed={myId ?? "me"}
-                      label="You"
-                      stream={voice.localStream}
-                      isLocal
-                      micMuted={voice.micMuted}
-                    />
-                    {Object.entries(voice.peers).map(([userId, peer]) => (
-                      <VoiceTile
-                        key={userId}
-                        seed={userId}
-                        label={nameFor(userId)}
-                        stream={peer.stream}
-                        micMuted={peer.connectionState !== "connected"}
-                        deafened={deafened}
-                      />
-                    ))}
-                  </div>
+                  {(() => {
+                    const sharingSelf = voice.screenSharing;
+                    const sharingPeerId = voice.screenSharingPeerIds.find((id) => voice.peers[id]);
+                    const spotlightId = sharingSelf ? "__me" : sharingPeerId;
+                    if (!spotlightId) {
+                      return (
+                        <div
+                          className="grid h-full auto-rows-fr gap-3"
+                          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}
+                        >
+                          <VoiceTile
+                            seed={myId ?? "me"}
+                            label="You"
+                            stream={voice.localStream}
+                            isLocal
+                            micMuted={voice.micMuted}
+                          />
+                          {Object.entries(voice.peers).map(([userId, peer]) => (
+                            <VoiceTile
+                              key={userId}
+                              seed={userId}
+                              label={nameFor(userId)}
+                              stream={peer.stream}
+                              micMuted={peer.connectionState !== "connected"}
+                              deafened={deafened}
+                            />
+                          ))}
+                        </div>
+                      );
+                    }
+                    // Discord-style spotlight: whoever's screen-sharing (self
+                    // or a peer) takes the large tile, everyone else lines
+                    // up in a scrollable strip beneath it.
+                    const others = [
+                      { id: "__me", isLocal: true },
+                      ...Object.keys(voice.peers).map((id) => ({ id, isLocal: false })),
+                    ].filter((p) => p.id !== spotlightId);
+                    return (
+                      <div className="flex h-full flex-col gap-3">
+                        <div className="min-h-0 flex-1">
+                          {spotlightId === "__me" ? (
+                            <VoiceTile
+                              seed={myId ?? "me"}
+                              label="You"
+                              stream={voice.localStream}
+                              isLocal
+                              micMuted={voice.micMuted}
+                              spotlight
+                              screenSharing
+                            />
+                          ) : (
+                            <VoiceTile
+                              seed={spotlightId}
+                              label={nameFor(spotlightId)}
+                              stream={voice.peers[spotlightId]?.stream}
+                              micMuted={voice.peers[spotlightId]?.connectionState !== "connected"}
+                              deafened={deafened}
+                              spotlight
+                              screenSharing
+                            />
+                          )}
+                        </div>
+                        {others.length > 0 && (
+                          <div className="noschat-scroll flex h-28 flex-none gap-2 overflow-x-auto">
+                            {others.map((p) =>
+                              p.isLocal ? (
+                                <div key="__me" className="aspect-video h-full flex-none">
+                                  <VoiceTile
+                                    seed={myId ?? "me"}
+                                    label="You"
+                                    stream={voice.localStream}
+                                    isLocal
+                                    micMuted={voice.micMuted}
+                                  />
+                                </div>
+                              ) : (
+                                <div key={p.id} className="aspect-video h-full flex-none">
+                                  <VoiceTile
+                                    seed={p.id}
+                                    label={nameFor(p.id)}
+                                    stream={voice.peers[p.id]?.stream}
+                                    micMuted={voice.peers[p.id]?.connectionState !== "connected"}
+                                    deafened={deafened}
+                                  />
+                                </div>
+                              ),
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Fixed bottom control bar — always visible over the grid,

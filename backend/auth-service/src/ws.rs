@@ -174,6 +174,12 @@ enum ClientEvent {
     // (channel_id, to) instead of dm_id.
     VoiceJoin { channel_id: Uuid },
     VoiceLeave { channel_id: Uuid },
+    /// Broadcast-to-channel (not 1:1 like Offer/Answer/Ice) notice that a
+    /// participant started/stopped screen sharing — lets every peer's UI
+    /// distinguish "this video track is a screen share" from "this is
+    /// their camera" without inspecting track metadata, which WebRTC
+    /// doesn't expose reliably cross-browser.
+    VoiceScreenShareState { channel_id: Uuid, sharing: bool },
     VoiceOffer { channel_id: Uuid, to: Uuid, sdp: Value },
     VoiceAnswer { channel_id: Uuid, to: Uuid, sdp: Value },
     VoiceIceCandidate { channel_id: Uuid, to: Uuid, candidate: Value },
@@ -371,6 +377,20 @@ async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent
                 "user_id": user_id,
             });
             state.ws_hub.send_to_many(&remaining, payload).await;
+        }
+        ClientEvent::VoiceScreenShareState { channel_id, sharing } => {
+            if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {
+                return;
+            }
+            let members = state.ws_hub.voice_members(channel_id).await;
+            let others: Vec<Uuid> = members.into_iter().filter(|id| *id != user_id).collect();
+            let payload = json!({
+                "type": "voice_screen_share_state",
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "sharing": sharing,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
         }
         ClientEvent::VoiceOffer { channel_id, to, sdp } => {
             if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {

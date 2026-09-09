@@ -91,6 +91,7 @@ export type RealtimeEvent =
   | { type: "voice_channel_state"; channel_id: string; user_ids: string[] }
   | { type: "voice_user_joined"; channel_id: string; user_id: string }
   | { type: "voice_user_left"; channel_id: string; user_id: string }
+  | { type: "voice_screen_share_state"; channel_id: string; user_id: string; sharing: boolean }
   | {
       type: "voice_offer";
       channel_id: string;
@@ -127,6 +128,7 @@ export type CallSignal =
 export type GuildVoiceSignal =
   | { type: "voice_join"; channel_id: string }
   | { type: "voice_leave"; channel_id: string }
+  | { type: "voice_screen_share_state"; channel_id: string; sharing: boolean }
   | { type: "voice_offer"; channel_id: string; to: string; sdp: RTCSessionDescriptionInit }
   | { type: "voice_answer"; channel_id: string; to: string; sdp: RTCSessionDescriptionInit }
   | {

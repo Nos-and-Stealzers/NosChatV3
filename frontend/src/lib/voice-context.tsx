@@ -47,6 +47,7 @@ export type VoiceState = {
   micMuted: boolean;
   cameraOn: boolean;
   screenSharing: boolean;
+  screenSharingPeerIds: string[];
   localStream: MediaStream | null;
 };
 
@@ -57,6 +58,7 @@ const IDLE_STATE: VoiceState = {
   micMuted: false,
   cameraOn: false,
   screenSharing: false,
+  screenSharingPeerIds: [],
   localStream: null,
 };
 
@@ -280,6 +282,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           micMuted: micMutedRef.current,
           cameraOn: false,
           screenSharing: false,
+          screenSharingPeerIds: [],
           localStream: stream,
         });
         sendGuildSignal({ type: "voice_join", channel_id: channelId });
@@ -410,6 +413,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
       screenSharingRef.current = false;
       setVoice((prev) => ({ ...prev, screenSharing: false, localStream: localStreamRef.current }));
       await renegotiateAllPeers(channelId);
+      sendGuildSignal({ type: "voice_screen_share_state", channel_id: channelId, sharing: false });
       return;
     }
 
@@ -456,6 +460,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
         localStream: localStreamRef.current,
       }));
       await renegotiateAllPeers(channelId);
+      sendGuildSignal({ type: "voice_screen_share_state", channel_id: channelId, sharing: true });
     } catch (e) {
       console.warn("voice: failed to start screen share", e);
     }
@@ -483,6 +488,20 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
         case "voice_user_left": {
           if (event.channel_id !== channelIdRef.current) return;
           teardownPeer(event.user_id);
+          setVoice((prev) => ({
+            ...prev,
+            screenSharingPeerIds: prev.screenSharingPeerIds.filter((id) => id !== event.user_id),
+          }));
+          break;
+        }
+        case "voice_screen_share_state": {
+          if (event.channel_id !== channelIdRef.current) return;
+          setVoice((prev) => ({
+            ...prev,
+            screenSharingPeerIds: event.sharing
+              ? [...prev.screenSharingPeerIds.filter((id) => id !== event.user_id), event.user_id]
+              : prev.screenSharingPeerIds.filter((id) => id !== event.user_id),
+          }));
           break;
         }
         case "voice_offer": {
