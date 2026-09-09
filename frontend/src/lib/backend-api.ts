@@ -406,6 +406,8 @@ export type GuildDetail = {
   icon_color: string;
   owner_id: string;
   verification_level: number;
+  description: string | null;
+  system_channel_id: string | null;
   my_permissions: number;
   categories: ChannelCategory[];
   channels: GuildChannel[];
@@ -429,6 +431,7 @@ export type GuildMessage = {
   created_at: string;
   edited_at: string | null;
   pinned_at?: string | null;
+  is_system?: boolean;
   reactions?: ReactionSummary[];
   attachment?: AttachmentMeta | null;
 };
@@ -488,7 +491,7 @@ export function getGuild(token: string, guildId: string) {
 export function updateGuild(
   token: string,
   guildId: string,
-  patch: { name?: string; icon_color?: string; verification_level?: number },
+  patch: { name?: string; icon_color?: string; verification_level?: number; description?: string; system_channel_id?: string | null },
 ) {
   return req<GuildDetail>(`/guilds/${guildId}`, token, {
     method: "PATCH",

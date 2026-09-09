@@ -1319,6 +1319,15 @@ export function GuildView({
               ) : (
                 <div className="space-y-4">
                   {activeMessages.map((m) => {
+                    if (m.is_system) {
+                      return (
+                        <div key={m.id} className="flex items-center gap-2 px-1 py-0.5 text-xs italic text-[#6B7280]">
+                          <span className="h-px flex-1 max-w-4 bg-[#2A2F3A]" />
+                          <span>{m.content}</span>
+                          <span className="font-mono text-[10px] not-italic text-[#4A5060]">{clockTime(m.created_at)}</span>
+                        </div>
+                      );
+                    }
                     const mine = m.sender_id === myId;
                     const canDelete = mine || canManageMessages;
                     return (

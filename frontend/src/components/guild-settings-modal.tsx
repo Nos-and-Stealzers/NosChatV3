@@ -124,6 +124,8 @@ export function GuildSettingsModal({
   const [newInviteExpiry, setNewInviteExpiry] = useState("");
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [verificationLevelDraft, setVerificationLevelDraft] = useState(0);
+  const [descriptionDraft, setDescriptionDraft] = useState("");
+  const [systemChannelDraft, setSystemChannelDraft] = useState<string>("");
 
   useEffect(() => {
     if (!open) return;
@@ -143,6 +145,8 @@ export function GuildSettingsModal({
       setNameDraft(d.name);
       setColorDraft(d.icon_color);
       setVerificationLevelDraft(d.verification_level);
+      setDescriptionDraft(d.description ?? "");
+      setSystemChannelDraft(d.system_channel_id ?? "");
       if (hasPermission(d.my_permissions, PERMISSIONS.MANAGE_ROLES)) {
         setRoles(await listRoles(token, guildId));
       }
@@ -192,7 +196,13 @@ export function GuildSettingsModal({
     try {
       const token = await getToken();
       if (!token) return;
-      await updateGuild(token, guildId, { name: nameDraft.trim(), icon_color: colorDraft, verification_level: verificationLevelDraft });
+      await updateGuild(token, guildId, {
+        name: nameDraft.trim(),
+        icon_color: colorDraft,
+        verification_level: verificationLevelDraft,
+        description: descriptionDraft.trim(),
+        system_channel_id: systemChannelDraft || null,
+      });
       await refresh();
       onGuildUpdated?.();
     } catch (e) {
@@ -496,6 +506,41 @@ export function GuildSettingsModal({
                       />
                     ))}
                   </div>
+                </div>
+                <div>
+                  <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                    Server Description
+                  </label>
+                  <textarea
+                    value={descriptionDraft}
+                    onChange={(e) => setDescriptionDraft(e.target.value.slice(0, 1024))}
+                    placeholder="What's this server about?"
+                    rows={3}
+                    className="w-full resize-none rounded-lg border border-[#2A2F3A] bg-[#0F1217]/80 px-3 py-2 text-sm text-[#E8EAED] outline-none placeholder:text-[#5A6070] focus:border-[#F0A868]"
+                  />
+                  <p className="mt-1 text-right text-[10px] text-[#5A6070]">{descriptionDraft.length}/1024</p>
+                </div>
+                <div>
+                  <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                    System Messages Channel
+                  </label>
+                  <p className="mb-2 text-xs text-[#8B93A1]">
+                    Where NosChat posts "X joined the server" messages.
+                  </p>
+                  <select
+                    value={systemChannelDraft}
+                    onChange={(e) => setSystemChannelDraft(e.target.value)}
+                    className="w-full rounded-lg border border-[#2A2F3A] bg-[#0F1217]/80 px-3 py-2 text-sm text-[#E8EAED] outline-none focus:border-[#F0A868]"
+                  >
+                    <option value="">No system channel</option>
+                    {(detail?.channels ?? [])
+                      .filter((c) => c.kind === "text")
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          #{c.name}
+                        </option>
+                      ))}
+                  </select>
                 </div>
                 <div>
                   <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">

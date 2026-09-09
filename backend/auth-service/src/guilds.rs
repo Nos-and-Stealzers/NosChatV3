@@ -178,6 +178,58 @@ async fn log_audit(
     }
 }
 
+/// Posts a real "X joined the server" system message into the guild's
+/// configured system_channel_id, if one is set — mirrors Discord's
+/// default join-message behavior. Best-effort: any failure here (no
+/// system channel configured, insert error) is silently swallowed since
+/// this is a nicety, never something that should block an actual join.
+async fn post_join_system_message(state: &AppState, guild_id: Uuid, user_id: Uuid) {
+    let system_channel: Option<(Option<Uuid>,)> =
+        sqlx::query_as("SELECT system_channel_id FROM guilds WHERE id = $1")
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+    let Some((Some(channel_id),)) = system_channel else {
+        return;
+    };
+
+    let username: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT username, email FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+    let Some((uname, email)) = username else { return };
+    let display = uname.unwrap_or(email);
+
+    let row: Option<GuildMessageRow> = sqlx::query_as(
+        "INSERT INTO guild_messages (channel_id, sender_id, content, is_system)
+         VALUES ($1, $2, $3, true)
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at, is_system,
+                   NULL::text AS attachment_mime, NULL::text AS attachment_filename, NULL::int AS attachment_size",
+    )
+    .bind(channel_id)
+    .bind(user_id)
+    .bind(format!("{display} joined the server."))
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+
+    let Some(row) = row else { return };
+    let msg = GuildMessageView::from(row);
+
+    let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let recipient_ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "guild_message", "guild_id": guild_id, "channel_id": channel_id, "message": &msg,
+    })).await;
+}
+
 /// Force-disconnects `user_id` from any voice channel *belonging to this
 /// guild* they're currently in, and notifies the remaining participants —
 /// used when a member is kicked or leaves, so they don't keep transmitting
@@ -278,6 +330,8 @@ pub struct GuildMessageView {
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
     pub pinned_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub is_system: bool,
     #[sqlx(skip)]
     pub attachment: Option<GuildAttachmentMeta>,
 }
@@ -298,6 +352,8 @@ struct GuildMessageRow {
     created_at: DateTime<Utc>,
     edited_at: Option<DateTime<Utc>>,
     pinned_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    is_system: bool,
     attachment_mime: Option<String>,
     attachment_filename: Option<String>,
     attachment_size: Option<i32>,
@@ -317,6 +373,7 @@ impl From<GuildMessageRow> for GuildMessageView {
             created_at: r.created_at,
             edited_at: r.edited_at,
             pinned_at: r.pinned_at,
+            is_system: r.is_system,
             attachment,
         }
     }
@@ -490,6 +547,8 @@ pub async fn auto_join_default_guild(state: &AppState, user_id: Uuid) -> Result<
         .bind(user_id)
         .execute(&state.db)
         .await?;
+
+    post_join_system_message(state, guild_id, user_id).await;
 
     let default_role: Option<(Uuid,)> =
         sqlx::query_as("SELECT id FROM guild_roles WHERE guild_id = $1 AND is_default = true")
@@ -701,13 +760,13 @@ pub async fn get_guild(
     let me = local_user_id(&state, &claims.sub).await?;
     assert_member(&state, guild_id, me).await?;
 
-    let guild: Option<(Uuid, String, String, Uuid, i16)> =
-        sqlx::query_as("SELECT id, name, icon_color, owner_id, verification_level FROM guilds WHERE id = $1")
+    let guild: Option<(Uuid, String, String, Uuid, i16, Option<String>, Option<Uuid>)> =
+        sqlx::query_as("SELECT id, name, icon_color, owner_id, verification_level, description, system_channel_id FROM guilds WHERE id = $1")
             .bind(guild_id)
             .fetch_optional(&state.db)
             .await
             .map_err(internal_err)?;
-    let Some((id, name, icon_color, owner_id, verification_level)) = guild else {
+    let Some((id, name, icon_color, owner_id, verification_level, description, system_channel_id)) = guild else {
         return Err(not_found("guild not found"));
     };
 
@@ -754,6 +813,8 @@ pub async fn get_guild(
         "icon_color": icon_color,
         "owner_id": owner_id,
         "verification_level": verification_level,
+        "description": description,
+        "system_channel_id": system_channel_id,
         "my_permissions": bits,
         "my_roles": my_roles,
         "categories": categories,
@@ -766,6 +827,8 @@ pub struct UpdateGuildBody {
     pub name: Option<String>,
     pub icon_color: Option<String>,
     pub verification_level: Option<i16>,
+    pub description: Option<String>,
+    pub system_channel_id: Option<Uuid>,
 }
 
 /// `PATCH /guilds/:id` — requires MANAGE_GUILD.
@@ -784,24 +847,37 @@ pub async fn update_guild(
         }
     }
 
-    let row: Option<(Uuid, String, String, i16)> = sqlx::query_as(
+    let description = body.description.as_deref().map(|d| {
+        d.chars().take(1024).collect::<String>()
+    });
+
+    let row: Option<(Uuid, String, String, i16, Option<String>, Option<Uuid>)> = sqlx::query_as(
         "UPDATE guilds SET name = COALESCE($2, name), icon_color = COALESCE($3, icon_color),
-             verification_level = COALESCE($4, verification_level), updated_at = now()
-         WHERE id = $1 RETURNING id, name, icon_color, verification_level",
+             verification_level = COALESCE($4, verification_level),
+             description = COALESCE($5, description),
+             system_channel_id = COALESCE($6, system_channel_id),
+             updated_at = now()
+         WHERE id = $1 RETURNING id, name, icon_color, verification_level, description, system_channel_id",
     )
     .bind(guild_id)
     .bind(body.name)
     .bind(body.icon_color)
     .bind(body.verification_level)
+    .bind(description)
+    .bind(body.system_channel_id)
     .fetch_optional(&state.db)
     .await
     .map_err(internal_err)?;
 
-    let Some((id, name, icon_color, verification_level)) = row else {
+    let Some((id, name, icon_color, verification_level, description, system_channel_id)) = row else {
         return Err(not_found("guild not found"));
     };
 
-    Ok(Json(json!({ "id": id, "name": name, "icon_color": icon_color, "verification_level": verification_level })))
+    Ok(Json(json!({
+        "id": id, "name": name, "icon_color": icon_color,
+        "verification_level": verification_level, "description": description,
+        "system_channel_id": system_channel_id,
+    })))
 }
 
 const MAX_ICON_BYTES: usize = 2 * 1024 * 1024; // 2MB — same inline-in-Postgres cap as sounds.rs
@@ -2560,6 +2636,10 @@ pub async fn accept_invite(
     }
 
     tx.commit().await.map_err(internal_err)?;
+
+    if already_member.is_none() {
+        post_join_system_message(&state, guild_id, me).await;
+    }
 
     Ok(Json(json!({ "guild_id": guild_id, "status": "joined" })))
 }
