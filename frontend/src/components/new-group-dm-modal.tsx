@@ -8,20 +8,8 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { X, Users, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { avatarRamp, initialOf } from "@/lib/utils";
+import { ClickableAvatar } from "@/components/profile-card";
 import { createGroupDm, type Friendship } from "@/lib/backend-api";
-
-// Small local avatar circle — mirrors chat-app.tsx's own (unexported)
-// Avatar helper so this modal doesn't need a cross-file dependency on it.
-function MiniAvatar({ seed, label }: { seed: string; label: string }) {
-  return (
-    <span
-      className={`flex size-8 flex-none items-center justify-center rounded-full bg-gradient-to-br text-xs font-semibold text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.3)_inset] ${avatarRamp(seed)}`}
-    >
-      {initialOf(label)}
-    </span>
-  );
-}
 
 const MAX_OTHERS = 9; // + the caller = 10 total, matching the backend cap.
 
@@ -147,15 +135,24 @@ export function NewGroupDmModal({
                 const isSelected = selected.has(f.user_id);
                 const disabled = !isSelected && selected.size >= MAX_OTHERS;
                 return (
-                  <button
+                  <div
                     key={f.user_id}
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => toggle(f.user_id)}
+                    role="button"
+                    tabIndex={disabled ? -1 : 0}
+                    aria-disabled={disabled}
+                    onClick={() => {
+                      if (!disabled) toggle(f.user_id);
+                    }}
+                    onKeyDown={(e) => {
+                      if (!disabled && (e.key === "Enter" || e.key === " ")) {
+                        e.preventDefault();
+                        toggle(f.user_id);
+                      }
+                    }}
                     data-active={isSelected}
-                    className="group flex w-full items-center gap-3 rounded-xl border border-transparent px-2.5 py-2 text-left transition-colors hover:bg-[#1B1F27] data-[active=true]:border-[#F0A868]/30 data-[active=true]:bg-[#1E232C] disabled:cursor-not-allowed disabled:opacity-40"
+                    className="group flex w-full cursor-pointer items-center gap-3 rounded-xl border border-transparent px-2.5 py-2 text-left transition-colors hover:bg-[#1B1F27] data-[active=true]:border-[#F0A868]/30 data-[active=true]:bg-[#1E232C] aria-disabled:cursor-not-allowed aria-disabled:opacity-40"
                   >
-                    <MiniAvatar seed={f.user_id} label={label} />
+                    <ClickableAvatar userId={f.user_id} label={label} size="sm" showStatus={false} />
                     <span className="min-w-0 flex-1 truncate text-sm text-[#E8EAED]">
                       {label}
                     </span>
@@ -165,7 +162,7 @@ export function NewGroupDmModal({
                     >
                       {isSelected && <Check className="size-3" />}
                     </span>
-                  </button>
+                  </div>
                 );
               })
             )}

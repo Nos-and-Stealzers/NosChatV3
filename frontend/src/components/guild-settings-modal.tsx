@@ -18,6 +18,7 @@ import {
   Crown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ClickableAvatar } from "@/components/profile-card";
 import { Input } from "@/components/ui/input";
 import {
   getGuild,
@@ -573,6 +574,7 @@ export function GuildSettingsModal({
                       className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
                     >
                       <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm text-[#E8EAED]">
+                        <ClickableAvatar userId={m.user_id} label={label} size="sm" />
                         {m.user_id === detail?.owner_id && (
                           <span title="Server Owner">
                             <Crown className="size-3.5 flex-none text-[#F0C868]" />

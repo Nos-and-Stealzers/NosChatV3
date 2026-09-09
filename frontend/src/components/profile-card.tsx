@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, X } from "lucide-react";
 import { avatarRamp, initialOf } from "@/lib/utils";
 import { usePresence } from "@/lib/presence-context";
+import { AvatarWithStatus } from "@/components/status-dot";
 import { StatusDot } from "@/components/status-dot";
 import type { PresenceMode, PresenceStatus, PublicProfile } from "@/lib/backend-api";
 
@@ -193,6 +194,86 @@ function ColorSwatchRow({
         ))}
       </div>
     </div>
+  );
+}
+
+const AVATAR_DIMS = {
+  sm: "h-7 w-7 text-xs",
+  md: "h-9 w-9 text-sm",
+  lg: "h-16 w-16 text-2xl",
+  xl: "h-20 w-20 text-3xl",
+} as const;
+
+// Site-wide clickable avatar: renders an initials-avatar (optionally with a
+// live status dot) that, on click, pops open the shared ProfileCard for
+// that user. This is the one canonical building block every avatar in the
+// app should use — DM list, friend rows, message senders, guild member
+// list, voice tiles/rosters, group-DM pickers, account menu — so clicking
+// any avatar anywhere always opens the same real profile popover instead of
+// each surface re-implementing its own bespoke click handling (or none at
+// all). `userId` doubles as the avatarRamp seed so colors stay identical to
+// any lingering non-clickable <Avatar seed=userId .../> usages.
+export function ClickableAvatar({
+  userId,
+  label,
+  size = "md",
+  showStatus = true,
+  dotSize,
+  anchorClassName = "absolute top-full left-0 mt-2 z-50",
+  className = "",
+}: {
+  userId: string;
+  label: string;
+  size?: keyof typeof AVATAR_DIMS;
+  // Some surfaces (e.g. the local voice tile / call grid) render an avatar
+  // for a user whose live status isn't meaningful to show inline — set to
+  // false to render a plain avatar with no status-dot overlay.
+  showStatus?: boolean;
+  dotSize?: "sm" | "md" | "lg";
+  anchorClassName?: string;
+  className?: string;
+}) {
+  const { statusOf, ownProfile } = usePresence();
+  const [open, setOpen] = useState(false);
+  const isSelf = !!ownProfile && userId === ownProfile.id;
+
+  const avatarEl = (
+    <span
+      className={`flex flex-none items-center justify-center rounded-full bg-gradient-to-br font-semibold text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.3)_inset] ${AVATAR_DIMS[size]} ${avatarRamp(userId)} ${className}`}
+    >
+      {initialOf(label)}
+    </span>
+  );
+
+  return (
+    <span className="relative inline-flex flex-none">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="rounded-full transition-transform hover:scale-105"
+        title={label}
+      >
+        {showStatus ? (
+          <AvatarWithStatus status={statusOf(userId)} dotSize={dotSize ?? (size === "sm" ? "sm" : "md")}>
+            {avatarEl}
+          </AvatarWithStatus>
+        ) : (
+          avatarEl
+        )}
+      </button>
+      {open && (
+        <ProfileCard
+          userId={userId}
+          isSelf={isSelf}
+          label={label}
+          onClose={() => setOpen(false)}
+          anchorClassName={anchorClassName}
+        />
+      )}
+    </span>
   );
 }
 

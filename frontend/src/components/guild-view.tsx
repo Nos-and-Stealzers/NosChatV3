@@ -77,7 +77,7 @@ import { Users } from "lucide-react";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ReactionBar } from "@/components/reaction-bar";
 import { usePresence } from "@/lib/presence-context";
-import { AvatarWithStatus } from "@/components/status-dot";
+import { ClickableAvatar } from "@/components/profile-card";
 
 function Avatar({
   seed,
@@ -200,7 +200,11 @@ function VoiceTile({
             data-speaking={speaking}
             className="rounded-full p-1 ring-2 ring-transparent transition-all duration-150 data-[speaking=true]:animate-speaking-pulse data-[speaking=true]:ring-[#4ADE80]"
           >
-            <Avatar seed={seed} label={label} size="xl" />
+            {isLocal ? (
+              <Avatar seed={seed} label={label} size="xl" />
+            ) : (
+              <ClickableAvatar userId={seed} label={label} size="xl" showStatus={false} />
+            )}
           </span>
         </div>
       )}
@@ -278,7 +282,7 @@ export function GuildView({
   const { getToken } = useAuth();
   const { subscribe } = useRealtime();
   const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare } = useVoice();
-  const { statusOf, fetchProfile } = usePresence();
+  const { fetchProfile } = usePresence();
 
   const [detail, setDetail] = useState<GuildDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -962,7 +966,7 @@ export function GuildView({
                             <div className="ml-6 flex flex-col gap-1 py-1">
                               {presentUsers.map((uid) => (
                                 <div key={uid} className="flex items-center gap-1.5 text-xs text-[#8B93A1]">
-                                  <Avatar seed={uid} label={nameFor(uid)} size="sm" />
+                                  <ClickableAvatar userId={uid} label={nameFor(uid)} size="sm" />
                                   <span className="truncate">{nameFor(uid)}</span>
                                 </div>
                               ))}
@@ -1085,9 +1089,7 @@ export function GuildView({
                     const canDelete = mine || canManageMessages;
                     return (
                       <div key={m.id} className="group/msg animate-rise-in flex gap-2.5">
-                        <AvatarWithStatus status={statusOf(m.sender_id)}>
-                          <Avatar seed={m.sender_id} label={nameFor(m.sender_id)} />
-                        </AvatarWithStatus>
+                        <ClickableAvatar userId={m.sender_id} label={nameFor(m.sender_id)} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
                             <span className="text-sm font-semibold text-[#E8EAED]">
@@ -1271,9 +1273,7 @@ export function GuildView({
                               key={m.user_id}
                               className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-[#1B1F27]"
                             >
-                              <AvatarWithStatus status={statusOf(m.user_id)} dotSize="sm">
-                                <Avatar seed={m.user_id} label={label} size="sm" />
-                              </AvatarWithStatus>
+                              <ClickableAvatar userId={m.user_id} label={label} size="sm" />
                               <span className="min-w-0 flex-1 truncate text-sm text-[#C7CDD6]">
                                 {m.user_id === myId ? "You" : label}
                               </span>

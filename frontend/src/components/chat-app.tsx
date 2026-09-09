@@ -77,7 +77,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { ReactionBar } from "@/components/reaction-bar";
 import { usePresence } from "@/lib/presence-context";
 import { AvatarWithStatus, StatusDot } from "@/components/status-dot";
-import { ProfileCard } from "@/components/profile-card";
+import { ProfileCard, ClickableAvatar } from "@/components/profile-card";
 
 type View = { kind: "friends" } | { kind: "dm"; dmId: string } | { kind: "guild"; guildId: string };
 
@@ -196,6 +196,9 @@ function Avatar({
 // this file (account menu, friend rows, DM header, message senders).
 // `userId` doubles as the avatarRamp seed so colors stay consistent with
 // plain <Avatar seed=... /> usages elsewhere that haven't been swapped over.
+// Thin wrapper around the site-wide ClickableAvatar (profile-card.tsx) —
+// kept as a local name so existing call sites in this file don't need
+// touching.
 function AvatarWithProfile({
   userId,
   label,
@@ -207,34 +210,7 @@ function AvatarWithProfile({
   size?: "sm" | "md" | "lg";
   dotSize?: "sm" | "md" | "lg";
 }) {
-  const { statusOf, ownProfile } = usePresence();
-  const [open, setOpen] = useState(false);
-  const isSelf = !!ownProfile && userId === ownProfile.id;
-  return (
-    <span className="relative inline-flex flex-none">
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-        className="rounded-full transition-transform hover:scale-105"
-      >
-        <AvatarWithStatus status={statusOf(userId)} dotSize={dotSize ?? (size === "sm" ? "sm" : "md")}>
-          <Avatar seed={userId} label={label} size={size} />
-        </AvatarWithStatus>
-      </button>
-      {open && (
-        <ProfileCard
-          userId={userId}
-          isSelf={isSelf}
-          label={label}
-          onClose={() => setOpen(false)}
-          anchorClassName="absolute top-full left-0 mt-2"
-        />
-      )}
-    </span>
-  );
+  return <ClickableAvatar userId={userId} label={label} size={size} dotSize={dotSize} />;
 }
 
 // The app's one bold, load-bearing motif: a dot that reflects whether the
