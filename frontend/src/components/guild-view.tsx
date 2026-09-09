@@ -18,7 +18,6 @@ import {
   Hash,
   Volume2,
   ChevronDown,
-  ChevronRight,
   Settings,
   UserPlus,
   Send,
@@ -1030,7 +1029,9 @@ export function GuildView({
                     }
                     className="flex w-full items-center gap-1 px-1.5 py-1 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1] hover:text-[#E8EAED]"
                   >
-                    {collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+                    <ChevronDown
+                      className={`size-3 transition-transform duration-200 ${collapsed ? "-rotate-90" : "rotate-0"}`}
+                    />
                     <span className="flex-1 text-left">{group.category.name}</span>
                     {canManageGuild && (
                       <span
@@ -1049,7 +1050,7 @@ export function GuildView({
                   </button>
                 )}
                 {!collapsed && (
-                  <div className="space-y-0.5">
+                  <div className="animate-list-item-in space-y-0.5">
                     {group.channels.map((ch) => {
                       const isActive = activeChannelId === ch.id;
                       const presentUsers = voicePresence[ch.id] ?? [];
