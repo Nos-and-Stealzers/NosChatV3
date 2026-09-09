@@ -143,11 +143,16 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // get queued here and flushed once setRemoteDescription resolves.
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const ringLoopRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ringTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const stopRingLoop = useCallback(() => {
     if (ringLoopRef.current) {
       clearInterval(ringLoopRef.current);
       ringLoopRef.current = null;
+    }
+    if (ringTimeoutRef.current) {
+      clearTimeout(ringTimeoutRef.current);
+      ringTimeoutRef.current = null;
     }
   }, []);
 
@@ -327,8 +332,14 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         callType,
       });
       sendCallSignal({ type: "call_ring", dm_id: dmId, video: callType === "video" });
+      // Auto-cancel an unanswered call after 45s — matches typical VoIP
+      // "no answer" behavior instead of ringing forever if the callee's
+      // tab is closed/backgrounded and never sees the incoming ring.
+      ringTimeoutRef.current = setTimeout(() => {
+        endAndNotify();
+      }, 45_000);
     },
-    [call.status, connected, sendCallSignal],
+    [call.status, connected, sendCallSignal, endAndNotify],
   );
 
   const cancelCall = useCallback(() => {
@@ -515,6 +526,13 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
               n.close();
             };
           }
+          // Matching safety-net timeout on the callee side: if the caller's
+          // tab/network dies mid-ring without a clean call_end reaching us
+          // (WS drop, crash), don't leave the ring UI stuck forever.
+          ringTimeoutRef.current = setTimeout(() => {
+            stopRingLoop();
+            teardown();
+          }, 45_000);
           break;
         }
 
