@@ -694,6 +694,21 @@ export function listPinnedMessages(token: string, guildId: string, channelId: st
   return req<GuildMessage[]>(`/guilds/${guildId}/channels/${channelId}/pins`, token);
 }
 
+export type AuditLogEntry = {
+  id: string;
+  actor_id: string | null;
+  actor_username: string | null;
+  action_type: string;
+  target_id: string | null;
+  target_label: string | null;
+  reason: string | null;
+  created_at: string;
+};
+
+export function getGuildAuditLog(token: string, guildId: string) {
+  return req<AuditLogEntry[]>(`/guilds/${guildId}/audit-log`, token);
+}
+
 export function toggleGuildReaction(
   token: string,
   guildId: string,

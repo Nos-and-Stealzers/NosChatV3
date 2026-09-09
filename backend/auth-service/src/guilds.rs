@@ -146,6 +146,38 @@ async fn assert_member(state: &AppState, guild_id: Uuid, user_id: Uuid) -> Resul
     Ok(())
 }
 
+/// Appends one row to guild_audit_log. Best-effort — a logging failure
+/// must never block the actual moderation action it's describing, so
+/// errors here are only logged to tracing, never propagated as an
+/// ApiError. `target_label` is a human-readable snapshot (e.g. a
+/// username or channel name) captured at action time, so the log still
+/// reads sensibly even after the target itself is later renamed/deleted.
+async fn log_audit(
+    state: &AppState,
+    guild_id: Uuid,
+    actor_id: Uuid,
+    action_type: &str,
+    target_id: Option<Uuid>,
+    target_label: Option<&str>,
+    reason: Option<&str>,
+) {
+    if let Err(e) = sqlx::query(
+        "INSERT INTO guild_audit_log (guild_id, actor_id, action_type, target_id, target_label, reason)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(guild_id)
+    .bind(actor_id)
+    .bind(action_type)
+    .bind(target_id)
+    .bind(target_label)
+    .bind(reason)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!("failed to write audit log entry ({action_type} in {guild_id}): {e:#}");
+    }
+}
+
 /// Force-disconnects `user_id` from any voice channel *belonging to this
 /// guild* they're currently in, and notifies the remaining participants —
 /// used when a member is kicked or leaves, so they don't keep transmitting
@@ -1008,6 +1040,16 @@ pub async fn kick_member(
 
     force_disconnect_guild_voice(&state, guild_id, user_id).await;
 
+    let target_label: Option<(Option<String>,)> = sqlx::query_as("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+    log_audit(
+        &state, guild_id, me, "member_kick", Some(user_id),
+        target_label.and_then(|(u,)| u).as_deref(), None,
+    ).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1084,6 +1126,16 @@ pub async fn ban_member(
         "type": "guild_banned", "guild_id": guild_id,
     })).await;
 
+    let target_label: Option<(Option<String>,)> = sqlx::query_as("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+    log_audit(
+        &state, guild_id, me, "member_ban", Some(user_id),
+        target_label.and_then(|(u,)| u).as_deref(), reason.as_deref(),
+    ).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1103,6 +1155,16 @@ pub async fn unban_member(
         .execute(&state.db)
         .await
         .map_err(internal_err)?;
+
+    let target_label: Option<(Option<String>,)> = sqlx::query_as("SELECT username FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+    log_audit(
+        &state, guild_id, me, "member_unban", Some(user_id),
+        target_label.and_then(|(u,)| u).as_deref(), None,
+    ).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1143,9 +1205,51 @@ pub async fn list_bans(
     Ok(Json(rows))
 }
 
-// ---------------------------------------------------------------------
-// Channels & categories
-// ---------------------------------------------------------------------
+#[derive(Serialize, sqlx::FromRow)]
+pub struct AuditLogEntryView {
+    pub id: Uuid,
+    pub actor_id: Option<Uuid>,
+    pub actor_username: Option<String>,
+    pub action_type: String,
+    pub target_id: Option<Uuid>,
+    pub target_label: Option<String>,
+    pub reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /guilds/:id/audit-log` — requires ADMINISTRATOR (this is
+/// deliberately more restrictive than BAN_MEMBERS/KICK_MEMBERS individually
+/// since the log surfaces the full moderation history at once, matching
+/// Discord's own "Audit Log" tab gating). Capped at the most recent 200
+/// entries — this is a review tool, not an export/compliance feature.
+pub async fn list_audit_log(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Vec<AuditLogEntryView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_ADMINISTRATOR).await?;
+
+    let rows: Vec<AuditLogEntryView> = sqlx::query_as(
+        r#"
+        SELECT l.id, l.actor_id, u.username AS actor_username, l.action_type,
+               l.target_id, l.target_label, l.reason, l.created_at
+        FROM guild_audit_log l
+        LEFT JOIN users u ON u.id = l.actor_id
+        WHERE l.guild_id = $1
+        ORDER BY l.created_at DESC
+        LIMIT 200
+        "#,
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows))
+}
+
+
 
 #[derive(Deserialize)]
 pub struct CreateChannelBody {
@@ -1265,12 +1369,24 @@ pub async fn delete_channel(
     let me = local_user_id(&state, &claims.sub).await?;
     require_permission(&state, guild_id, me, PERM_MANAGE_CHANNELS).await?;
 
+    let channel_name: Option<(String,)> = sqlx::query_as("SELECT name FROM guild_channels WHERE id = $1 AND guild_id = $2")
+        .bind(channel_id)
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+
     sqlx::query("DELETE FROM guild_channels WHERE id = $1 AND guild_id = $2")
         .bind(channel_id)
         .bind(guild_id)
         .execute(&state.db)
         .await
         .map_err(internal_err)?;
+
+    log_audit(
+        &state, guild_id, me, "channel_delete", Some(channel_id),
+        channel_name.map(|(n,)| n).as_deref(), None,
+    ).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

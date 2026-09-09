@@ -197,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(guilds::ban_member).delete(guilds::unban_member),
         )
         .route("/guilds/{id}/bans", get(guilds::list_bans))
+        .route("/guilds/{id}/audit-log", get(guilds::list_audit_log))
         .route(
             "/guilds/{id}/members/{user_id}/roles/{role_id}",
             put(guilds::assign_role).delete(guilds::unassign_role),

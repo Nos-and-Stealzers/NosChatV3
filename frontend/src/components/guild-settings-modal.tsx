@@ -28,6 +28,8 @@ import {
   banGuildMember,
   unbanGuildMember,
   listGuildBans,
+  getGuildAuditLog,
+  type AuditLogEntry,
   uploadGuildIcon,
   deleteGuildIcon,
   guildIconUrl,
@@ -49,7 +51,7 @@ import {
   type Invite,
 } from "@/lib/backend-api";
 
-type Tab = "general" | "roles" | "members" | "bans" | "invites";
+type Tab = "general" | "roles" | "members" | "bans" | "invites" | "audit-log";
 
 const ICON_COLORS = [
   "#F0A868", "#5FD9C4", "#8FA6F0", "#E88FD0", "#F0C868", "#7ED0E8", "#EB5757", "#4ADE80",
@@ -120,6 +122,7 @@ export function GuildSettingsModal({
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [newInviteMaxUses, setNewInviteMaxUses] = useState("");
   const [newInviteExpiry, setNewInviteExpiry] = useState("");
+  const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
 
   useEffect(() => {
     if (!open) return;
@@ -145,6 +148,9 @@ export function GuildSettingsModal({
       if (hasPermission(d.my_permissions, PERMISSIONS.BAN_MEMBERS)) {
         setBans(await listGuildBans(token, guildId));
       }
+      if (hasPermission(d.my_permissions, PERMISSIONS.ADMINISTRATOR)) {
+        setAuditLog(await getGuildAuditLog(token, guildId));
+      }
       if (hasPermission(d.my_permissions, PERMISSIONS.MANAGE_GUILD)) {
         setInvites(await listInvites(token, guildId));
       }
@@ -168,6 +174,7 @@ export function GuildSettingsModal({
   const canManageRoles = hasPermission(myPerms, PERMISSIONS.MANAGE_ROLES);
   const canKick = hasPermission(myPerms, PERMISSIONS.KICK_MEMBERS);
   const canBan = hasPermission(myPerms, PERMISSIONS.BAN_MEMBERS);
+  const canAdmin = hasPermission(myPerms, PERMISSIONS.ADMINISTRATOR);
 
   const tabs: { id: Tab; label: string; visible: boolean }[] = [
     { id: "general" as Tab, label: "General", visible: canManageGuild },
@@ -175,6 +182,7 @@ export function GuildSettingsModal({
     { id: "members" as Tab, label: "Members", visible: true },
     { id: "bans" as Tab, label: "Bans", visible: canBan },
     { id: "invites" as Tab, label: "Invites", visible: canManageGuild },
+    { id: "audit-log" as Tab, label: "Audit Log", visible: canAdmin },
   ].filter((t) => t.visible);
 
   async function handleSaveGeneral() {
@@ -676,6 +684,42 @@ export function GuildSettingsModal({
                     >
                       Unban
                     </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {tab === "audit-log" && canAdmin && (
+              <div className="space-y-1.5">
+                {auditLog.length === 0 && (
+                  <p className="text-sm text-[#8B93A1]">No moderation activity yet.</p>
+                )}
+                {auditLog.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5 text-sm"
+                  >
+                    <p className="text-[#E8EAED]">
+                      <span className="font-medium">{entry.actor_username ?? "Unknown"}</span>{" "}
+                      <span className="text-[#8B93A1]">
+                        {{
+                          member_kick: "kicked",
+                          member_ban: "banned",
+                          member_unban: "unbanned",
+                          channel_delete: "deleted channel",
+                        }[entry.action_type] ?? entry.action_type}
+                      </span>{" "}
+                      {entry.target_label && (
+                        <span className="font-medium">{entry.target_label}</span>
+                      )}
+                    </p>
+                    {entry.reason && (
+                      <p className="mt-0.5 truncate text-xs text-[#8B93A1]">
+                        Reason: {entry.reason}
+                      </p>
+                    )}
+                    <p className="mt-0.5 text-[10px] text-[#5A6272]">
+                      {new Date(entry.created_at).toLocaleString()}
+                    </p>
                   </div>
                 ))}
               </div>
