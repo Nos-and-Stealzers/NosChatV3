@@ -424,6 +424,7 @@ export type GuildMessage = {
   content: string;
   created_at: string;
   edited_at: string | null;
+  pinned_at?: string | null;
   reactions?: ReactionSummary[];
   attachment?: AttachmentMeta | null;
 };
@@ -669,6 +670,26 @@ export function deleteGuildMessage(
     token,
     { method: "DELETE" },
   );
+}
+
+export function pinGuildMessage(token: string, guildId: string, channelId: string, messageId: string) {
+  return req<GuildMessage>(
+    `/guilds/${guildId}/channels/${channelId}/messages/${messageId}/pin`,
+    token,
+    { method: "POST" },
+  );
+}
+
+export function unpinGuildMessage(token: string, guildId: string, channelId: string, messageId: string) {
+  return req<GuildMessage>(
+    `/guilds/${guildId}/channels/${channelId}/messages/${messageId}/pin`,
+    token,
+    { method: "DELETE" },
+  );
+}
+
+export function listPinnedMessages(token: string, guildId: string, channelId: string) {
+  return req<GuildMessage[]>(`/guilds/${guildId}/channels/${channelId}/pins`, token);
 }
 
 export function toggleGuildReaction(

@@ -40,6 +40,8 @@ import {
   VideoOff,
   Maximize2,
   Copy,
+  Pin,
+  PinOff,
 } from "lucide-react";
 import { useContextMenuHandler } from "@/lib/context-menu";
 import { Button } from "@/components/ui/button";
@@ -68,6 +70,9 @@ import {
   toggleGuildReaction,
   kickGuildMember,
   banGuildMember,
+  pinGuildMessage,
+  unpinGuildMessage,
+  listPinnedMessages,
   type GuildDetail,
   type GuildChannel,
   type GuildMessage,
@@ -636,6 +641,57 @@ export function GuildView({
     }
   }
 
+  // Pinned messages: kept in a per-channel map (like messagesByChannel) so
+  // switching channels doesn't lose what's already been fetched. Toggling
+  // a pin locally patches messagesByChannel's copy of the message too, so
+  // the inline pin icon updates immediately without a full refetch.
+  const [pinnedByChannel, setPinnedByChannel] = useState<Record<string, GuildMessage[]>>({});
+  const [pinnedPanelOpen, setPinnedPanelOpen] = useState(false);
+
+  async function refreshPinned(channelId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      const pins = await listPinnedMessages(token, guildId, channelId);
+      setPinnedByChannel((prev) => ({ ...prev, [channelId]: pins }));
+    } catch {
+      // best-effort — pinned panel just stays empty/stale on failure
+    }
+  }
+
+  function patchMessagePinState(channelId: string, messageId: string, pinnedAt: string | null) {
+    setMessagesByChannel((prev) => ({
+      ...prev,
+      [channelId]: (prev[channelId] ?? []).map((m) =>
+        m.id === messageId ? { ...m, pinned_at: pinnedAt } : m,
+      ),
+    }));
+  }
+
+  async function handlePinMessage(channelId: string, messageId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      const updated = await pinGuildMessage(token, guildId, channelId, messageId);
+      patchMessagePinState(channelId, messageId, updated.pinned_at ?? new Date().toISOString());
+      await refreshPinned(channelId);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to pin message");
+    }
+  }
+
+  async function handleUnpinMessage(channelId: string, messageId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await unpinGuildMessage(token, guildId, channelId, messageId);
+      patchMessagePinState(channelId, messageId, null);
+      await refreshPinned(channelId);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to unpin message");
+    }
+  }
+
   // Swaps this channel's position with its immediate up/down neighbor
   // *within the same category group* (same list groupChannels() already
   // sorts by position) — two PATCH calls, not a full drag-and-drop reorder,
@@ -1107,6 +1163,18 @@ export function GuildView({
               <Button
                 size="icon-sm"
                 variant="ghost"
+                onClick={() => {
+                  setPinnedPanelOpen((v) => !v);
+                  if (!pinnedByChannel[activeChannel.id]) void refreshPinned(activeChannel.id);
+                }}
+                title={pinnedPanelOpen ? "Hide pinned messages" : "Show pinned messages"}
+                className={pinnedPanelOpen ? "text-[#F0A868]" : "text-[#8B93A1]"}
+              >
+                <Pin className="size-4" />
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
                 onClick={() => setShowMemberList((v) => !v)}
                 title={showMemberList ? "Hide member list" : "Show member list"}
                 className={showMemberList ? "text-[#F0A868]" : "text-[#8B93A1]"}
@@ -1114,6 +1182,42 @@ export function GuildView({
                 <Users className="size-4" />
               </Button>
             </div>
+
+            {pinnedPanelOpen && (
+              <div className="noschat-scroll flex-none border-b border-[#1D2129] bg-[#0F1217] px-4 py-3" style={{ maxHeight: "40vh", overflowY: "auto" }}>
+                <p className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                  <Pin className="size-3" /> Pinned Messages — {(pinnedByChannel[activeChannel.id] ?? []).length}
+                </p>
+                {(pinnedByChannel[activeChannel.id] ?? []).length === 0 ? (
+                  <p className="text-xs text-[#8B93A1]">No pinned messages in this channel yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {(pinnedByChannel[activeChannel.id] ?? []).map((m) => (
+                      <div key={m.id} className="flex items-start gap-2 rounded-lg border border-[#1D2129] bg-[#12151B] p-2.5">
+                        <ClickableAvatar userId={m.sender_id} label={nameFor(m.sender_id)} size="sm" />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-xs font-semibold text-[#E8EAED]">{nameFor(m.sender_id)}</span>
+                            <span className="font-mono text-[10px] text-[#8B93A1]">{clockTime(m.created_at)}</span>
+                          </div>
+                          <p className="mt-0.5 truncate text-sm text-[#C7CDD6]">{m.content}</p>
+                        </div>
+                        {canManageMessages && (
+                          <button
+                            type="button"
+                            onClick={() => void handleUnpinMessage(activeChannel.id, m.id)}
+                            title="Unpin"
+                            className="flex-none rounded-md p-1 text-[#8B93A1] hover:bg-[#1B1F27] hover:text-[#EB5757]"
+                          >
+                            <PinOff className="size-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col">
@@ -1138,8 +1242,17 @@ export function GuildView({
                         key={m.id}
                         className="group/msg animate-rise-in flex gap-2.5"
                         onContextMenu={handleContextMenu(() => [
+                          { kind: "label" as const, label: "Message" },
                           { kind: "item" as const, label: "Copy Text", icon: Copy, onSelect: () => void navigator.clipboard.writeText(m.content) },
                           { kind: "item" as const, label: "Copy Message ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(m.id) },
+                          ...(canManageMessages
+                            ? [
+                                { kind: "separator" as const },
+                                m.pinned_at
+                                  ? { kind: "item" as const, label: "Unpin Message", icon: PinOff, onSelect: () => void handleUnpinMessage(activeChannel.id, m.id) }
+                                  : { kind: "item" as const, label: "Pin Message", icon: Pin, onSelect: () => void handlePinMessage(activeChannel.id, m.id) },
+                              ]
+                            : []),
                           ...(mine || canDelete
                             ? [
                                 { kind: "separator" as const },
@@ -1162,6 +1275,12 @@ export function GuildView({
                             </span>
                             {m.edited_at && (
                               <span className="text-[10px] italic text-[#8B93A1]">(edited)</span>
+                            )}
+                            {m.pinned_at && (
+                              <span className="flex items-center gap-0.5 text-[10px] text-[#F0A868]">
+                                <Pin className="size-2.5" />
+                                Pinned
+                              </span>
                             )}
                             {(mine || canDelete) && editingMessageId !== m.id && (
                               <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">

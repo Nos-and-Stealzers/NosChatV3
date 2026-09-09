@@ -219,6 +219,14 @@ async fn main() -> anyhow::Result<()> {
             get(guilds::get_channel_attachment),
         )
         .route(
+            "/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}/pin",
+            post(guilds::pin_message).delete(guilds::unpin_message),
+        )
+        .route(
+            "/guilds/{guild_id}/channels/{channel_id}/pins",
+            get(guilds::list_pinned_messages),
+        )
+        .route(
             "/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}/reactions",
             post(guilds::toggle_channel_reaction),
         )

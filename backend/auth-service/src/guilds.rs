@@ -243,6 +243,7 @@ pub struct GuildMessageView {
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
+    pub pinned_at: Option<DateTime<Utc>>,
     #[sqlx(skip)]
     pub attachment: Option<GuildAttachmentMeta>,
 }
@@ -262,6 +263,7 @@ struct GuildMessageRow {
     content: String,
     created_at: DateTime<Utc>,
     edited_at: Option<DateTime<Utc>>,
+    pinned_at: Option<DateTime<Utc>>,
     attachment_mime: Option<String>,
     attachment_filename: Option<String>,
     attachment_size: Option<i32>,
@@ -280,6 +282,7 @@ impl From<GuildMessageRow> for GuildMessageView {
             content: r.content,
             created_at: r.created_at,
             edited_at: r.edited_at,
+            pinned_at: r.pinned_at,
             attachment,
         }
     }
@@ -1333,7 +1336,7 @@ pub async fn list_channel_messages(
     let rows: Vec<GuildMessageRow> = sqlx::query_as(
         r#"
         SELECT * FROM (
-            SELECT id, channel_id, sender_id, content, created_at, edited_at,
+            SELECT id, channel_id, sender_id, content, created_at, edited_at, pinned_at,
                    attachment_mime, attachment_filename, attachment_size
             FROM guild_messages WHERE channel_id = $1
             ORDER BY created_at DESC LIMIT 50
@@ -1406,7 +1409,7 @@ pub async fn send_channel_message(
     let row: GuildMessageRow = sqlx::query_as(
         "INSERT INTO guild_messages (channel_id, sender_id, content, attachment_data, attachment_mime, attachment_filename, attachment_size)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, channel_id, sender_id, content, created_at, edited_at, attachment_mime, attachment_filename, attachment_size",
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(channel_id)
     .bind(me)
@@ -1596,7 +1599,7 @@ pub async fn edit_channel_message(
     let row: Option<GuildMessageView> = sqlx::query_as(
         "UPDATE guild_messages SET content = $3, edited_at = now()
          WHERE id = $1 AND channel_id = $2 AND sender_id = $4
-         RETURNING id, channel_id, sender_id, content, created_at, edited_at",
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at",
     )
     .bind(message_id)
     .bind(channel_id)
@@ -1622,6 +1625,115 @@ pub async fn edit_channel_message(
 
     Ok(Json(msg))
 }
+
+/// `POST /guilds/:id/channels/:channel_id/messages/:message_id/pin` — pins
+/// a message to the channel's Pinned Messages panel. Requires
+/// MANAGE_MESSAGES, matching Discord (pinning is a moderation action, not
+/// something every member can do to any message).
+pub async fn pin_message(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id, message_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<GuildMessageView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_MESSAGES).await?;
+    assert_text_channel(&state, guild_id, channel_id).await?;
+
+    let row: Option<GuildMessageView> = sqlx::query_as(
+        "UPDATE guild_messages SET pinned_at = now(), pinned_by = $3
+         WHERE id = $1 AND channel_id = $2
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at",
+    )
+    .bind(message_id)
+    .bind(channel_id)
+    .bind(me)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some(msg) = row else {
+        return Err(not_found("message not found"));
+    };
+
+    let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "guild_message_pinned", "guild_id": guild_id, "channel_id": channel_id, "message": &msg,
+    })).await;
+
+    Ok(Json(msg))
+}
+
+/// `DELETE /guilds/:id/channels/:channel_id/messages/:message_id/pin` —
+/// unpins a message. Same MANAGE_MESSAGES gate as pinning.
+pub async fn unpin_message(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id, message_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<GuildMessageView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_MESSAGES).await?;
+    assert_text_channel(&state, guild_id, channel_id).await?;
+
+    let row: Option<GuildMessageView> = sqlx::query_as(
+        "UPDATE guild_messages SET pinned_at = NULL, pinned_by = NULL
+         WHERE id = $1 AND channel_id = $2
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at",
+    )
+    .bind(message_id)
+    .bind(channel_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some(msg) = row else {
+        return Err(not_found("message not found"));
+    };
+
+    let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "guild_message_unpinned", "guild_id": guild_id, "channel_id": channel_id, "message": &msg,
+    })).await;
+
+    Ok(Json(msg))
+}
+
+/// `GET /guilds/:id/channels/:channel_id/pins` — lists every currently
+/// pinned message in the channel, newest pin first (matches Discord's
+/// Pinned Messages panel ordering).
+pub async fn list_pinned_messages(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, channel_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Vec<GuildMessageView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_VIEW_CHANNELS).await?;
+    assert_text_channel(&state, guild_id, channel_id).await?;
+
+    let rows: Vec<GuildMessageRow> = sqlx::query_as(
+        "SELECT id, channel_id, sender_id, content, created_at, edited_at, pinned_at,
+                attachment_mime, attachment_filename, attachment_size
+         FROM guild_messages
+         WHERE channel_id = $1 AND pinned_at IS NOT NULL
+         ORDER BY pinned_at DESC",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows.into_iter().map(GuildMessageView::from).collect()))
+}
+
 
 /// `DELETE /guilds/:id/channels/:channel_id/messages/:message_id` — the
 /// sender can always delete their own message; anyone with MANAGE_MESSAGES
