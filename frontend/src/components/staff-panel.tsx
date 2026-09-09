@@ -15,6 +15,8 @@ import { useAuth } from "@clerk/nextjs";
 import {
   X,
   ShieldCheck,
+  ShieldOff,
+  ShieldBan,
   Users,
   Server,
   Activity,
@@ -27,6 +29,8 @@ import {
   adminStats,
   adminListUsers,
   adminDeleteUser,
+  adminBanUser,
+  adminUnbanUser,
   adminListGuilds,
   adminDeleteGuild,
   type AdminStats,
@@ -134,6 +138,21 @@ export function StaffPanel({ open, onClose }: { open: boolean; onClose: () => vo
       await loadUsers();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete user");
+    }
+  }
+
+  async function handleToggleBan(u: AdminUserRow) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      if (u.banned_at) {
+        await adminUnbanUser(token, u.id);
+      } else {
+        await adminBanUser(token, u.id, "Banned via staff panel");
+      }
+      await loadUsers();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update ban status");
     }
   }
 
@@ -245,21 +264,41 @@ export function StaffPanel({ open, onClose }: { open: boolean; onClose: () => vo
                                 STAFF
                               </span>
                             )}
+                            {u.banned_at && (
+                              <span className="ml-2 rounded-full bg-[#EB5757]/15 px-2 py-0.5 text-[10px] text-[#EB5757]">
+                                BANNED
+                              </span>
+                            )}
                           </p>
                           <p className="truncate text-xs text-[#8B93A1]">
                             {u.email} · joined {timeAgo(u.created_at)}
                           </p>
                         </div>
                         {!u.is_staff && (
-                          <Button
-                            size="icon-sm"
-                            variant="ghost"
-                            onClick={() => setPendingDeleteUser(u)}
-                            className="hover:bg-[#EB5757]/10"
-                            title="Delete user"
-                          >
-                            <Trash2 className="size-3.5 text-[#EB5757]" />
-                          </Button>
+                          <>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              onClick={() => void handleToggleBan(u)}
+                              className={u.banned_at ? "hover:bg-[#4ADE80]/10" : "hover:bg-[#EB5757]/10"}
+                              title={u.banned_at ? "Unban user" : "Ban user"}
+                            >
+                              {u.banned_at ? (
+                                <ShieldOff className="size-3.5 text-[#4ADE80]" />
+                              ) : (
+                                <ShieldBan className="size-3.5 text-[#EB5757]" />
+                              )}
+                            </Button>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              onClick={() => setPendingDeleteUser(u)}
+                              className="hover:bg-[#EB5757]/10"
+                              title="Delete user"
+                            >
+                              <Trash2 className="size-3.5 text-[#EB5757]" />
+                            </Button>
+                          </>
                         )}
                       </div>
                     ))}

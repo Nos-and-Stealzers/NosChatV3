@@ -868,6 +868,7 @@ export type AdminUserRow = {
   username: string | null;
   is_staff: boolean;
   created_at: string;
+  banned_at?: string | null;
 };
 
 export function adminListUsers(token: string, opts?: { q?: string; limit?: number; offset?: number }) {

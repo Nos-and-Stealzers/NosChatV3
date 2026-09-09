@@ -55,6 +55,7 @@ pub struct AdminUserRow {
     pub username: Option<String>,
     pub is_staff: bool,
     pub created_at: DateTime<Utc>,
+    pub banned_at: Option<DateTime<Utc>>,
 }
 
 /// `GET /admin/me` — lets the frontend cheaply check "am I staff" without
@@ -137,7 +138,7 @@ pub async fn admin_list_users(
 
     let rows: Vec<AdminUserRow> = if let Some(q) = q {
         sqlx::query_as(
-            "SELECT id, email, username, is_staff, created_at FROM users
+            "SELECT id, email, username, is_staff, created_at, banned_at FROM users
              WHERE lower(email) LIKE $1 OR lower(username) LIKE $1
              ORDER BY created_at DESC LIMIT $2 OFFSET $3",
         )
@@ -149,7 +150,7 @@ pub async fn admin_list_users(
         .map_err(internal_err)?
     } else {
         sqlx::query_as(
-            "SELECT id, email, username, is_staff, created_at FROM users
+            "SELECT id, email, username, is_staff, created_at, banned_at FROM users
              ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
