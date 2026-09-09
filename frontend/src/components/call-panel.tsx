@@ -39,6 +39,23 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const [expanded, setExpanded] = useState(false);
+  // Elapsed-time counter, ticking only while actually connected — resets
+  // whenever a fresh call starts (status leaves "active" then re-enters).
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (call.status !== "active") {
+      setElapsedSec(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => setElapsedSec(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [call.status]);
+  function formatDuration(sec: number): string {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  }
 
   function handleScreenShareClick() {
     if (
@@ -67,7 +84,7 @@ export function CallPanel({ peerLabel }: { peerLabel: string }) {
       ? "Ringing…"
       : call.status === "connecting"
         ? "Connecting…"
-        : "In call";
+        : `In call · ${formatDuration(elapsedSec)}`;
 
   return (
     <div

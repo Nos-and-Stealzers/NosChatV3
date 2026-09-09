@@ -1001,6 +1001,24 @@ export function GuildView({
   const groups = groupChannels(detail.categories, detail.channels, canManageGuild || settings.allowNsfwChannels);
   const activeMessages = activeChannel ? (messagesByChannel[activeChannel.id] ?? []) : [];
   const inVoiceChannel = voice.channelId === activeChannel?.id;
+  const [vcElapsedSec, setVcElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!inVoiceChannel) {
+      setVcElapsedSec(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => setVcElapsedSec(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [inVoiceChannel]);
+  function formatVcDuration(sec: number): string {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return h > 0
+      ? `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
+      : `${m}:${s.toString().padStart(2, "0")}`;
+  }
 
   // Anyone present in any voice channel right now counts as "in voice" for
   // the member list badge — the only real-time presence signal this app
@@ -1732,7 +1750,7 @@ export function GuildView({
               <span className="text-sm font-semibold text-[#E8EAED]">{activeChannel.name}</span>
               {inVoiceChannel && (
                 <span className="ml-2 flex items-center gap-1 rounded-full bg-[#4ADE80]/10 px-2 py-0.5 text-[11px] font-medium text-[#4ADE80]">
-                  <span className="size-1.5 rounded-full bg-[#4ADE80]" /> Connected
+                  <span className="size-1.5 rounded-full bg-[#4ADE80]" /> {formatVcDuration(vcElapsedSec)}
                 </span>
               )}
             </div>
