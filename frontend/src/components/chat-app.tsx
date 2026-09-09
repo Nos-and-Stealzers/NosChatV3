@@ -31,6 +31,7 @@ import {
   ShieldOff,
   Pencil,
   Reply,
+  Search,
   Trash2,
   UserPlus,
   SmilePlus,
@@ -69,6 +70,7 @@ import {
   type BlockedUser,
   markGuildChannelRead,
   getGuildUnread,
+  searchDmMessages,
   type Friendship,
   type DmSummary,
   type Message,
@@ -1090,6 +1092,26 @@ export function ChatApp({
 
   const [renamingDm, setRenamingDm] = useState(false);
   const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+  const [dmSearchOpen, setDmSearchOpen] = useState(false);
+  const [dmSearchQuery, setDmSearchQuery] = useState("");
+  const [dmSearchResults, setDmSearchResults] = useState<Message[]>([]);
+  const [dmSearching, setDmSearching] = useState(false);
+  async function handleDmSearch() {
+    if (!activeDm || !dmSearchQuery.trim()) {
+      setDmSearchResults([]);
+      return;
+    }
+    const token = await getToken();
+    if (!token) return;
+    setDmSearching(true);
+    try {
+      setDmSearchResults(await searchDmMessages(token, activeDm.id, dmSearchQuery.trim()));
+    } catch {
+      setDmSearchResults([]);
+    } finally {
+      setDmSearching(false);
+    }
+  }
   const [renameDraft, setRenameDraft] = useState("");
   async function handleRenameDm() {
     if (!activeDm) return;
@@ -1744,6 +1766,18 @@ export function ChatApp({
                 <Button
                   size="icon-sm"
                   variant="ghost"
+                  onClick={() => {
+                    setDmSearchQuery("");
+                    setDmSearchResults([]);
+                    setDmSearchOpen(true);
+                  }}
+                  title="Search messages"
+                >
+                  <Search className="size-4" />
+                </Button>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
                   disabled={!connected || call.status !== "idle" || !activeDm?.other_user_id}
                   onClick={() =>
                     activeDm?.other_user_id &&
@@ -2178,6 +2212,56 @@ export function ChatApp({
             <Button variant="ghost" className="mt-3 w-full" onClick={() => setAddMemberOpen(false)}>
               Close
             </Button>
+          </div>
+        </div>
+      )}
+
+      {dmSearchOpen && (
+        <div
+          className="fixed inset-0 z-[95] flex items-start justify-center bg-black/75 p-4 pt-20 backdrop-blur-[2px]"
+          onClick={() => setDmSearchOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg rounded-2xl border border-[#1D2129] bg-[#161A20] p-4 shadow-2xl"
+          >
+            <div className="flex items-center gap-2">
+              <Search className="size-4 flex-none text-[#8B93A1]" />
+              <Input
+                autoFocus
+                value={dmSearchQuery}
+                onChange={(e) => setDmSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleDmSearch();
+                  if (e.key === "Escape") setDmSearchOpen(false);
+                }}
+                placeholder="Search messages in this conversation…"
+                className="h-9 flex-1 rounded-lg border-[#2A2F3A] bg-[#0F1217]/80 text-sm text-[#E8EAED]"
+              />
+              <Button size="sm" onClick={() => void handleDmSearch()} disabled={dmSearching}>
+                {dmSearching ? "…" : "Search"}
+              </Button>
+            </div>
+            <div className="mt-3 max-h-[50vh] space-y-1.5 overflow-y-auto">
+              {dmSearching && <p className="py-4 text-center text-sm text-[#8B93A1]">Searching…</p>}
+              {!dmSearching && dmSearchQuery.trim() && dmSearchResults.length === 0 && (
+                <p className="py-4 text-center text-sm text-[#8B93A1]">No messages found.</p>
+              )}
+              {dmSearchResults.map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => setDmSearchOpen(false)}
+                  className="block w-full rounded-lg border border-[#1D2129] bg-[#12151B] px-3 py-2 text-left transition-colors hover:border-[#3A4050]"
+                >
+                  <p className="flex items-center gap-1.5 text-xs text-[#8B93A1]">
+                    <span className="font-medium text-[#C7CDD6]">{resolvePeerLabel(m.sender_id)}</span>
+                    <span className="text-[#5A6272]">·</span>
+                    {new Date(m.created_at).toLocaleString()}
+                  </p>
+                  <p className="mt-0.5 truncate text-sm text-[#E8EAED]">{m.content}</p>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}

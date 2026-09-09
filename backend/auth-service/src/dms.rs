@@ -643,6 +643,48 @@ pub async fn list_messages(
 }
 
 #[derive(Deserialize)]
+pub struct SearchDmMessagesQuery {
+    pub q: String,
+}
+
+/// `GET /dms/:dm_id/messages/search?q=...` — simple ILIKE search across a
+/// single DM's history (1:1 or group), newest first, capped at 50 —
+/// mirrors guilds::search_guild_messages' approach (no tsvector index,
+/// this app's message volume doesn't warrant one yet).
+pub async fn search_messages(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(dm_id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<SearchDmMessagesQuery>,
+) -> Result<Json<Vec<MessageView>>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_participant(&state, dm_id, me).await?;
+
+    let term = q.q.trim();
+    if term.is_empty() {
+        return Ok(Json(vec![]));
+    }
+    let pattern = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
+
+    let rows: Vec<MessageRow> = sqlx::query_as(
+        r#"
+        SELECT id, dm_id, sender_id, content, created_at, edited_at, reply_to_message_id,
+               attachment_mime, attachment_filename, attachment_size
+        FROM messages
+        WHERE dm_id = $1 AND content ILIKE $2
+        ORDER BY created_at DESC LIMIT 50
+        "#,
+    )
+    .bind(dm_id)
+    .bind(&pattern)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows.into_iter().map(MessageView::from).collect()))
+}
+
+#[derive(Deserialize)]
 pub struct EditMessageBody {
     pub content: String,
 }

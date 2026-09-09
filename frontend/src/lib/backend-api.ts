@@ -797,6 +797,11 @@ export function searchGuildMessages(token: string, guildId: string, q: string, c
   return req<GuildMessage[]>(`/guilds/${guildId}/messages/search?${params.toString()}`, token);
 }
 
+export function searchDmMessages(token: string, dmId: string, q: string) {
+  const params = new URLSearchParams({ q });
+  return req<Message[]>(`/dms/${dmId}/messages/search?${params.toString()}`, token);
+}
+
 export type AuditLogEntry = {
   id: string;
   actor_id: string | null;
