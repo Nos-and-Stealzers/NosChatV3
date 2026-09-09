@@ -106,15 +106,32 @@ export function removeFriend(token: string, id: string) {
 
 // ---- DMs -------------------------------------------------------------
 
+export type DmParticipant = { user_id: string; username: string | null; email: string };
+
 export type DmSummary = {
   id: string;
+  is_group: boolean;
+  name: string | null;
   other_user_id: string | null;
   other_username: string | null;
   other_email: string | null;
+  participants: DmParticipant[];
   last_message: string | null;
   last_message_at: string | null;
   unread_count: number;
 };
+
+/** Discord-style display label: explicit `name` if set, else the other
+ * participant's name for 1:1 DMs, else the joined participant names for
+ * an unnamed group DM (e.g. "Alice, Bob, Carol"). */
+export function dmDisplayLabel(dm: DmSummary): string {
+  if (dm.name && dm.name.trim()) return dm.name.trim();
+  if (dm.is_group) {
+    const names = dm.participants.map((p) => p.username ?? p.email);
+    return names.length > 0 ? names.join(", ") : "Group DM";
+  }
+  return dm.other_username ?? dm.other_email ?? "Unknown";
+}
 
 export type ReactionSummary = { emoji: string; count: number; reacted_by_me: boolean };
 
@@ -139,6 +156,24 @@ export function openDm(token: string, friendUserId: string) {
   return req<{ id: string }>("/dms", token, {
     method: "POST",
     body: JSON.stringify({ friend_user_id: friendUserId }),
+  });
+}
+
+/** Creates a new group DM (2-9 other friends, so 3-10 participants total
+ * including the caller). Unlike `openDm`, always creates a fresh channel. */
+export function createGroupDm(token: string, friendUserIds: string[]) {
+  return req<{ id: string }>("/dms/group", token, {
+    method: "POST",
+    body: JSON.stringify({ friend_user_ids: friendUserIds }),
+  });
+}
+
+/** Renames a group DM (or clears its name back to the default
+ * joined-participant-names display by passing `null`). 1:1 DMs can't be renamed. */
+export function renameGroupDm(token: string, dmId: string, name: string | null) {
+  return req<{ id: string; name: string | null }>(`/dms/${dmId}/name`, token, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
   });
 }
 
@@ -814,4 +849,24 @@ export function adminListGuilds(token: string) {
 
 export function adminDeleteGuild(token: string, guildId: string) {
   return req<void>(`/admin/guilds/${guildId}`, token, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------
+// GIF search (Tenor, proxied server-side so the API key stays private)
+// ---------------------------------------------------------------------
+
+export type GifResult = {
+  id: string;
+  title: string;
+  url: string;
+  preview_url: string;
+  width: number;
+  height: number;
+};
+
+export function searchGifs(token: string, query: string, limit = 24) {
+  const params = new URLSearchParams();
+  if (query.trim()) params.set("q", query.trim());
+  params.set("limit", String(limit));
+  return req<{ results: GifResult[] }>(`/gifs/search?${params.toString()}`, token);
 }

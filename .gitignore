@@ -7,6 +7,7 @@ frontend/.env*.local
 # Rust
 backend/target/
 backend/**/target/
+backend/target-verify/
 
 # Env files (never commit real secrets)
 .env

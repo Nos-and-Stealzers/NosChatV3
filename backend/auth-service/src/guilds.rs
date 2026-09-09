@@ -473,6 +473,80 @@ pub async fn auto_join_default_guild(state: &AppState, user_id: Uuid) -> Result<
     Ok(())
 }
 
+/// Ensures `user_id` (the dev/staff account) owns the default community
+/// guild and holds a role with full ADMINISTRATOR permissions there.
+/// Called opportunistically whenever the dev-staff-email account is seen
+/// (see routes.rs's get_or_create_local_user) so stealzers.com@gmail.com
+/// always ends up as the real owner + admin of the one guild every user is
+/// auto-joined to — self-healing the same way staff status does, no
+/// manual DB fix needed if the guild was created before this account
+/// existed or ownership drifted for any reason.
+pub async fn ensure_default_community_owner(state: &AppState, user_id: Uuid) -> Result<(), sqlx::Error> {
+    let guild_id = get_or_create_default_guild(state, user_id).await?;
+
+    sqlx::query("UPDATE guilds SET owner_id = $1 WHERE id = $2 AND owner_id <> $1")
+        .bind(user_id)
+        .bind(guild_id)
+        .execute(&state.db)
+        .await?;
+
+    // Make sure the owner is actually a member (should already be true via
+    // auto_join_default_guild, but this call can run standalone too).
+    sqlx::query("INSERT INTO guild_members (guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+
+    // Give them (and only them, individually — not @everyone) a dedicated
+    // "Admin" role with every permission bit set, on top of already being
+    // guild owner (owner already bypasses permission checks everywhere via
+    // the owner_id == user_id short-circuit in has_permission, but a
+    // visible role is also what makes them show up distinctly in the
+    // member list / role UI, matching how Discord server owners usually
+    // also hold a colored admin role rather than relying purely on the
+    // invisible owner bit).
+    let admin_role: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM guild_roles WHERE guild_id = $1 AND name = 'Admin'",
+    )
+    .bind(guild_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let role_id = match admin_role {
+        Some((id,)) => id,
+        None => {
+            let max_position: (Option<i32>,) =
+                sqlx::query_as("SELECT MAX(position) FROM guild_roles WHERE guild_id = $1")
+                    .bind(guild_id)
+                    .fetch_one(&state.db)
+                    .await?;
+            let position = max_position.0.unwrap_or(0) + 1;
+            let (id,): (Uuid,) = sqlx::query_as(
+                "INSERT INTO guild_roles (guild_id, name, position, permissions, color, is_default)
+                 VALUES ($1, 'Admin', $2, $3, '#F0A868', false) RETURNING id",
+            )
+            .bind(guild_id)
+            .bind(position)
+            .bind(PERM_ADMINISTRATOR)
+            .fetch_one(&state.db)
+            .await?;
+            id
+        }
+    };
+
+    sqlx::query(
+        "INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .bind(role_id)
+    .execute(&state.db)
+    .await?;
+
+    Ok(())
+}
+
 /// `POST /guilds` — creates a guild, an `@everyone` role, a default
 /// `general` text channel and `General` voice channel, and makes the
 /// caller the owner + first member.

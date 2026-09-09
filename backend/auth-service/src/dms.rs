@@ -119,28 +119,65 @@ pub async fn open_dm(
 #[derive(Serialize, sqlx::FromRow)]
 pub struct DmSummary {
     pub id: Uuid,
+    pub is_group: bool,
+    pub name: Option<String>,
+    /// 1:1 only — kept for backward compatibility with existing frontend
+    /// code that renders 1:1 DMs by these fields directly.
     pub other_user_id: Option<Uuid>,
     pub other_username: Option<String>,
     pub other_email: Option<String>,
+    /// All participants other than the caller, id + display name — used
+    /// for group DMs (and usable for 1:1 too) to build a display label
+    /// without a dedicated name column being required.
+    #[sqlx(skip)]
+    pub participants: Vec<DmParticipantView>,
     pub last_message: Option<String>,
     pub last_message_at: Option<DateTime<Utc>>,
     pub unread_count: i64,
 }
 
-/// `GET /dms` — every DM channel you're in, with the other participant
-/// (1:1 only — group DM listing isn't built yet), a preview, and how many
-/// messages from the other person are unread (messages after your
+#[derive(Serialize, Clone)]
+pub struct DmParticipantView {
+    pub user_id: Uuid,
+    pub username: Option<String>,
+    pub email: String,
+}
+
+/// Row shape actually selected for the DM list — participants are
+/// aggregated separately per-DM below since they're 1:N.
+#[derive(sqlx::FromRow)]
+struct DmSummaryRow {
+    id: Uuid,
+    is_group: bool,
+    name: Option<String>,
+    other_user_id: Option<Uuid>,
+    other_username: Option<String>,
+    other_email: Option<String>,
+    last_message: Option<String>,
+    last_message_at: Option<DateTime<Utc>>,
+    unread_count: i64,
+}
+
+/// `GET /dms` — every DM channel you're in (1:1 and group), with a
+/// preview and how many messages are unread (messages after your
 /// `last_read_message_id`, or all of them if you've never read this DM).
+/// For 1:1 DMs, `other_user_id`/`other_username`/`other_email` are also
+/// populated for backward compatibility; group DMs additionally carry the
+/// full `participants` list (everyone but the caller) so the frontend can
+/// build a "Alice, Bob, Carol" style label, or use `name` if the group
+/// has been explicitly renamed.
 pub async fn list_dms(
     State(state): State<AppState>,
     ClerkUser(claims): ClerkUser,
 ) -> Result<Json<Vec<DmSummary>>, (StatusCode, Json<serde_json::Value>)> {
     let me = local_user_id(&state, &claims.sub).await?;
 
-    let rows: Vec<DmSummary> = sqlx::query_as(
+    let rows: Vec<DmSummaryRow> = sqlx::query_as(
         r#"
         SELECT
             c.id,
+            c.is_group,
+            c.name,
             u.id AS other_user_id,
             u.username AS other_username,
             u.email AS other_email,
@@ -149,7 +186,7 @@ pub async fn list_dms(
             COALESCE(unread.cnt, 0) AS unread_count
         FROM dm_channels c
         JOIN dm_participants me_p ON me_p.dm_id = c.id AND me_p.user_id = $1
-        LEFT JOIN dm_participants other_p ON other_p.dm_id = c.id AND other_p.user_id <> $1
+        LEFT JOIN dm_participants other_p ON other_p.dm_id = c.id AND other_p.user_id <> $1 AND c.is_group = false
         LEFT JOIN users u ON u.id = other_p.user_id
         LEFT JOIN LATERAL (
             SELECT content, created_at FROM messages m
@@ -166,7 +203,6 @@ pub async fn list_dms(
                 )
               )
         ) unread ON true
-        WHERE c.is_group = false
         ORDER BY COALESCE(lm.created_at, c.created_at) DESC
         "#,
     )
@@ -175,7 +211,181 @@ pub async fn list_dms(
     .await
     .map_err(internal_err)?;
 
-    Ok(Json(rows))
+    // Fetch participants (other than the caller) for every group DM in one
+    // query, then fold them onto the corresponding summary row.
+    let group_ids: Vec<Uuid> = rows.iter().filter(|r| r.is_group).map(|r| r.id).collect();
+    let participant_rows: Vec<(Uuid, Uuid, Option<String>, String)> = if group_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT p.dm_id, u.id, u.username, u.email
+            FROM dm_participants p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.dm_id = ANY($1) AND p.user_id <> $2
+            ORDER BY u.username NULLS LAST, u.email
+            "#,
+        )
+        .bind(&group_ids)
+        .bind(me)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?
+    };
+
+    let summaries = rows
+        .into_iter()
+        .map(|r| {
+            let participants: Vec<DmParticipantView> = participant_rows
+                .iter()
+                .filter(|(dm_id, ..)| *dm_id == r.id)
+                .map(|(_, user_id, username, email)| DmParticipantView {
+                    user_id: *user_id,
+                    username: username.clone(),
+                    email: email.clone(),
+                })
+                .collect();
+            DmSummary {
+                id: r.id,
+                is_group: r.is_group,
+                name: r.name,
+                other_user_id: r.other_user_id,
+                other_username: r.other_username,
+                other_email: r.other_email,
+                participants,
+                last_message: r.last_message,
+                last_message_at: r.last_message_at,
+                unread_count: r.unread_count,
+            }
+        })
+        .collect();
+
+    Ok(Json(summaries))
+}
+
+#[derive(Deserialize)]
+pub struct CreateGroupDmBody {
+    /// The other participants (not including the caller). 2-9 entries, so
+    /// the resulting DM has 3-10 total participants including the caller.
+    pub friend_user_ids: Vec<Uuid>,
+}
+
+/// `POST /dms/group` `{ "friend_user_ids": ["...", "..."] }` — creates a
+/// new group DM (`is_group = true`) with the caller plus every listed
+/// friend. Unlike 1:1 `open_dm`, this always creates a new channel (no
+/// get-or-create dedup — Discord itself lets you create multiple distinct
+/// group DMs with the same members). All listed users must be accepted
+/// friends of the caller.
+pub async fn create_group_dm(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Json(body): Json<CreateGroupDmBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+
+    // De-dupe and drop the caller if they somehow included themselves.
+    let mut others: Vec<Uuid> = body.friend_user_ids.into_iter().filter(|id| *id != me).collect();
+    others.sort();
+    others.dedup();
+
+    if others.len() < 2 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "a group DM needs at least 2 other friends" })),
+        ));
+    }
+    if others.len() > 9 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "a group DM allows at most 10 participants total" })),
+        ));
+    }
+
+    for other in &others {
+        if !are_friends(&state, me, *other).await.map_err(internal_err)? {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "you can only start a group DM with accepted friends" })),
+            ));
+        }
+    }
+
+    let mut tx = state.db.begin().await.map_err(internal_err)?;
+    let (dm_id,): (Uuid,) = sqlx::query_as("INSERT INTO dm_channels (is_group) VALUES (true) RETURNING id")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+
+    sqlx::query("INSERT INTO dm_participants (dm_id, user_id) VALUES ($1, $2)")
+        .bind(dm_id)
+        .bind(me)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_err)?;
+    for other in &others {
+        sqlx::query("INSERT INTO dm_participants (dm_id, user_id) VALUES ($1, $2)")
+            .bind(dm_id)
+            .bind(other)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_err)?;
+    }
+
+    tx.commit().await.map_err(internal_err)?;
+
+    Ok(Json(json!({ "id": dm_id })))
+}
+
+#[derive(Deserialize)]
+pub struct RenameGroupDmBody {
+    /// Empty/whitespace-only clears the name back to the default
+    /// "joined participant names" display.
+    pub name: Option<String>,
+}
+
+/// `PATCH /dms/:id/name` `{ "name": "..." }` — renames a group DM. Any
+/// participant may rename it (matches Discord's default group DM
+/// permissions — no dedicated "owner" concept exists in this schema).
+/// 1:1 DMs can't be renamed.
+pub async fn rename_group_dm(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(dm_id): Path<Uuid>,
+    Json(body): Json<RenameGroupDmBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_participant(&state, dm_id, me).await?;
+
+    let is_group: Option<(bool,)> = sqlx::query_as("SELECT is_group FROM dm_channels WHERE id = $1")
+        .bind(dm_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if !matches!(is_group, Some((true,))) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "only group DMs can be renamed" })),
+        ));
+    }
+
+    let name = body.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    sqlx::query("UPDATE dm_channels SET name = $2 WHERE id = $1")
+        .bind(dm_id)
+        .bind(name)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    let participants: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
+        .bind(dm_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = participants.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({ "type": "dm_renamed", "dm_id": dm_id, "name": name })).await;
+
+    Ok(Json(json!({ "id": dm_id, "name": name })))
 }
 
 #[derive(Serialize, sqlx::FromRow)]

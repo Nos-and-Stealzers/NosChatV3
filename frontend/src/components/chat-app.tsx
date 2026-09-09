@@ -30,10 +30,12 @@ import {
   ShieldCheck,
   Pencil,
   Trash2,
+  UserPlus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AttachmentPreview } from "@/components/attachment-preview";
+import { GifPicker } from "@/components/gif-picker";
 import { Textarea } from "@/components/ui/textarea";
 import { avatarRamp, initialOf } from "@/lib/utils";
 import {
@@ -51,10 +53,12 @@ import {
   editDmMessage,
   deleteDmMessage,
   toggleDmReaction,
+  dmDisplayLabel,
   type Friendship,
   type DmSummary,
   type Message,
 } from "@/lib/backend-api";
+import { NewGroupDmModal } from "@/components/new-group-dm-modal";
 import { useRealtime } from "@/lib/realtime-context";
 import { useSoundSettings } from "@/lib/use-sound-settings";
 import { useCall } from "@/lib/call-context";
@@ -429,6 +433,7 @@ export function ChatApp({
     useState<import("@/lib/settings-context").CategoryId>("account");
   const [guilds, setGuilds] = useState<Guild[]>([]);
   const [createJoinOpen, setCreateJoinOpen] = useState(false);
+  const [newGroupDmOpen, setNewGroupDmOpen] = useState(false);
   // guild_id -> total unread across all its text channels, reported up by
   // each GuildView instance (see its onUnreadChanged prop) so the rail's
   // ping dot stays accurate even for guilds that aren't the active view.
@@ -476,6 +481,8 @@ export function ChatApp({
   // Composer quick-emoji picker open/closed.
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const [gifPickerOpen, setGifPickerOpen] = useState(false);
+  const gifPickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
@@ -490,6 +497,17 @@ export function ChatApp({
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [emojiPickerOpen]);
+
+  useEffect(() => {
+    if (!gifPickerOpen) return;
+    function onDocClickGif(e: MouseEvent) {
+      if (gifPickerRef.current && !gifPickerRef.current.contains(e.target as Node)) {
+        setGifPickerOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocClickGif);
+    return () => document.removeEventListener("mousedown", onDocClickGif);
+  }, [gifPickerOpen]);
 
   async function handleCopyMessage(id: string, content: string) {
     try {
@@ -571,6 +589,25 @@ export function ChatApp({
     setComposer((prev) => prev + emoji);
     setEmojiPickerOpen(false);
     composerRef.current?.focus();
+  }
+
+  async function handlePickGif(url: string) {
+    setGifPickerOpen(false);
+    if (view.kind !== "dm") return;
+    const token = await getToken();
+    if (!token) return;
+    const dmId = view.dmId;
+    try {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      const file = new File([blob], "gif.gif", { type: blob.type || "image/gif" });
+      await sendMessage(token, dmId, "", file);
+      if (settingsRef.current.soundOnOwnSentMessage) {
+        void sound.play("message");
+      }
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to send GIF");
+    }
   }
 
   const refreshFriends = useCallback(async () => {
@@ -982,7 +1019,7 @@ export function ChatApp({
   const activeMessages =
     view.kind === "dm" ? (messagesByDm[view.dmId] ?? []) : [];
   const activeGroups = groupMessages(activeMessages, settings.messageGroupingWindowMin);
-  const activeLabel = activeDm?.other_username ?? activeDm?.other_email ?? "?";
+  const activeLabel = activeDm ? dmDisplayLabel(activeDm) : "?";
   const activeTyping = view.kind === "dm" && !!typingIn[view.dmId] && settings.showTypingIndicatorText;
 
   // Resolves a display label for whoever's on the other end of a call from
@@ -1090,9 +1127,18 @@ export function ChatApp({
         </button>
 
         <div className="noschat-scroll mt-4 flex-1 overflow-y-auto px-2 pb-3">
-          <p className="px-2.5 pb-1.5 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
-            Direct Messages
-          </p>
+          <div className="flex items-center justify-between px-2.5 pb-1.5">
+            <p className="font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+              Direct Messages
+            </p>
+            <button
+              onClick={() => setNewGroupDmOpen(true)}
+              title="New Group DM"
+              className="flex size-5 flex-none items-center justify-center rounded text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+            >
+              <UserPlus className="size-3.5" />
+            </button>
+          </div>
           {dms.length > 4 && (
             <input
               value={dmFilter}
@@ -1118,23 +1164,19 @@ export function ChatApp({
               : dms
               .filter((dm) => {
                 if (!dmFilter.trim()) return true;
-                const label = (
-                  dm.other_username ??
-                  dm.other_email ??
-                  ""
-                ).toLowerCase();
+                const label = dmDisplayLabel(dm).toLowerCase();
                 return label.includes(dmFilter.trim().toLowerCase());
               })
               .sort((a, b) => {
                 if (settings.sortDmsBy === "alphabetical") {
-                  const la = (a.other_username ?? a.other_email ?? "").toLowerCase();
-                  const lb = (b.other_username ?? b.other_email ?? "").toLowerCase();
+                  const la = dmDisplayLabel(a).toLowerCase();
+                  const lb = dmDisplayLabel(b).toLowerCase();
                   return la.localeCompare(lb);
                 }
                 return (b.last_message_at ?? "").localeCompare(a.last_message_at ?? "");
               })
               .map((dm) => {
-                const label = dm.other_username ?? dm.other_email ?? "Unknown";
+                const label = dmDisplayLabel(dm);
                 const isActive = view.kind === "dm" && view.dmId === dm.id;
                 return (
                   <button
@@ -1752,6 +1794,21 @@ export function ChatApp({
                       </div>
                     )}
                   </div>
+                  <div ref={gifPickerRef} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setGifPickerOpen((v) => !v)}
+                      title="Send a GIF"
+                      className={`flex h-8 items-center justify-center rounded-full px-2 font-mono text-[10px] font-bold tracking-tight transition-colors hover:bg-[#1B1F27] ${gifPickerOpen ? "bg-[#1B1F27] text-[#F0A868]" : "text-[#8B93A1] hover:text-[#E8EAED]"}`}
+                    >
+                      GIF
+                    </button>
+                    {gifPickerOpen && (
+                      <div className="absolute bottom-11 left-0 z-50">
+                        <GifPicker onPick={(url) => void handlePickGif(url)} />
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div className="relative flex flex-1 items-end">
                   <Textarea
@@ -1800,6 +1857,17 @@ export function ChatApp({
         onJoined={(guildId) => {
           void refreshGuilds();
           openGuildView(guildId);
+        }}
+      />
+
+      <NewGroupDmModal
+        open={newGroupDmOpen}
+        onClose={() => setNewGroupDmOpen(false)}
+        friends={friends}
+        onCreated={async (dmId) => {
+          await refreshDms();
+          setView({ kind: "dm", dmId });
+          setMobileShowDetail(true);
         }}
       />
 

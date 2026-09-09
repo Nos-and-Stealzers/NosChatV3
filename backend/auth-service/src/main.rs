@@ -1,6 +1,7 @@
 mod clerk;
 mod dms;
 mod friends;
+mod gifs;
 mod guilds;
 mod profiles;
 mod routes;
@@ -160,11 +161,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/friends/requests/{id}/decline", post(friends::decline_request))
         .route("/friends/{id}", axum::routing::delete(friends::remove_friend))
         .route("/dms", get(dms::list_dms).post(dms::open_dm))
+        .route("/dms/group", post(dms::create_group_dm))
+        .route("/dms/{id}/name", axum::routing::patch(dms::rename_group_dm))
         .route("/dms/{id}/messages", get(dms::list_messages).post(dms::send_message))
         .route("/dms/{dm_id}/messages/{message_id}", axum::routing::patch(dms::edit_message).delete(dms::delete_message))
         .route("/dms/{dm_id}/messages/{message_id}/reactions", post(dms::toggle_reaction))
         .route("/dms/{dm_id}/messages/{message_id}/attachment", get(dms::get_attachment))
         .route("/dms/{id}/read", post(dms::mark_read))
+        .route("/gifs/search", get(gifs::search))
         .route("/guilds", get(guilds::list_guilds).post(guilds::create_guild))
         .route("/guilds/{id}", get(guilds::get_guild).patch(guilds::update_guild).delete(guilds::delete_guild))
         .route(

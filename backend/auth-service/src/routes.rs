@@ -98,7 +98,11 @@ pub async fn get_or_create_local_user(
                 )
             })?;
             tracing::info!("granted staff access to {} (dev account email match)", updated.id);
+            let _ = crate::guilds::ensure_default_community_owner(state, updated.id).await;
             return Ok(updated);
+        }
+        if is_dev_staff_email(&user.email) {
+            let _ = crate::guilds::ensure_default_community_owner(state, user.id).await;
         }
         return Ok(user);
     }
@@ -151,6 +155,9 @@ pub async fn get_or_create_local_user(
     // real errors.
     if let Err(e) = crate::guilds::auto_join_default_guild(state, user.id).await {
         tracing::error!("failed to auto-join {} to the default community: {e:#}", user.id);
+    }
+    if is_dev_staff_email(&user.email) {
+        let _ = crate::guilds::ensure_default_community_owner(state, user.id).await;
     }
 
     Ok(user)

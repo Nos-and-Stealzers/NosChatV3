@@ -15,6 +15,7 @@ import {
   Copy,
   Check,
   Ban as BanIcon,
+  Crown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,17 +54,38 @@ const ICON_COLORS = [
   "#F0A868", "#5FD9C4", "#8FA6F0", "#E88FD0", "#F0C868", "#7ED0E8", "#EB5757", "#4ADE80",
 ];
 
-const PERMISSION_LABELS: { bit: number; label: string }[] = [
-  { bit: PERMISSIONS.VIEW_CHANNELS, label: "View Channels" },
-  { bit: PERMISSIONS.SEND_MESSAGES, label: "Send Messages" },
-  { bit: PERMISSIONS.MANAGE_MESSAGES, label: "Manage Messages" },
-  { bit: PERMISSIONS.CONNECT, label: "Connect (Voice)" },
-  { bit: PERMISSIONS.SPEAK, label: "Speak" },
-  { bit: PERMISSIONS.MANAGE_CHANNELS, label: "Manage Channels" },
-  { bit: PERMISSIONS.MANAGE_ROLES, label: "Manage Roles" },
-  { bit: PERMISSIONS.KICK_MEMBERS, label: "Kick Members" },
-  { bit: PERMISSIONS.BAN_MEMBERS, label: "Ban Members" },
-  { bit: PERMISSIONS.MANAGE_GUILD, label: "Manage Server" },
+const PERMISSION_GROUPS: { title: string; perms: { bit: number; label: string }[] }[] = [
+  {
+    title: "General",
+    perms: [
+      { bit: PERMISSIONS.ADMINISTRATOR, label: "Administrator (all permissions)" },
+      { bit: PERMISSIONS.MANAGE_GUILD, label: "Manage Server" },
+      { bit: PERMISSIONS.MANAGE_ROLES, label: "Manage Roles" },
+      { bit: PERMISSIONS.MANAGE_CHANNELS, label: "Manage Channels" },
+    ],
+  },
+  {
+    title: "Membership",
+    perms: [
+      { bit: PERMISSIONS.KICK_MEMBERS, label: "Kick Members" },
+      { bit: PERMISSIONS.BAN_MEMBERS, label: "Ban Members" },
+    ],
+  },
+  {
+    title: "Text Channels",
+    perms: [
+      { bit: PERMISSIONS.VIEW_CHANNELS, label: "View Channels" },
+      { bit: PERMISSIONS.SEND_MESSAGES, label: "Send Messages" },
+      { bit: PERMISSIONS.MANAGE_MESSAGES, label: "Manage Messages" },
+    ],
+  },
+  {
+    title: "Voice Channels",
+    perms: [
+      { bit: PERMISSIONS.CONNECT, label: "Connect" },
+      { bit: PERMISSIONS.SPEAK, label: "Speak" },
+    ],
+  },
 ];
 
 export function GuildSettingsModal({
@@ -506,20 +528,33 @@ export function GuildSettingsModal({
                           </Button>
                         )}
                       </div>
-                      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-                        {PERMISSION_LABELS.map(({ bit, label }) => (
-                          <label
-                            key={bit}
-                            className="flex items-center gap-1.5 text-xs text-[#C7CDD6]"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={(role.permissions & bit) !== 0}
-                              onChange={() => handleTogglePermission(role, bit)}
-                              className="size-3.5 accent-[#F0A868]"
-                            />
-                            {label}
-                          </label>
+                      <div className="space-y-3">
+                        {PERMISSION_GROUPS.map((group) => (
+                          <div key={group.title}>
+                            <p className="mb-1 font-mono text-[9px] uppercase tracking-[0.15em] text-[#8B93A1]/70">
+                              {group.title}
+                            </p>
+                            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+                              {group.perms.map(({ bit, label }) => (
+                                <label
+                                  key={bit}
+                                  className="flex items-center gap-1.5 text-xs text-[#C7CDD6]"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={(role.permissions & bit) !== 0}
+                                    onChange={() => handleTogglePermission(role, bit)}
+                                    disabled={
+                                      bit !== PERMISSIONS.ADMINISTRATOR &&
+                                      (role.permissions & PERMISSIONS.ADMINISTRATOR) !== 0
+                                    }
+                                    className="size-3.5 accent-[#F0A868] disabled:opacity-40"
+                                  />
+                                  {label}
+                                </label>
+                              ))}
+                            </div>
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -537,7 +572,14 @@ export function GuildSettingsModal({
                       key={m.user_id}
                       className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B] px-3 py-2.5"
                     >
-                      <span className="min-w-0 flex-1 truncate text-sm text-[#E8EAED]">{label}</span>
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm text-[#E8EAED]">
+                        {m.user_id === detail?.owner_id && (
+                          <span title="Server Owner">
+                            <Crown className="size-3.5 flex-none text-[#F0C868]" />
+                          </span>
+                        )}
+                        <span className="truncate">{label}</span>
+                      </span>
                       <div className="flex flex-wrap gap-1">
                         {m.roles.map((r) => (
                           <span

@@ -34,6 +34,11 @@ import {
   ArrowUp,
   ArrowDown,
   Paperclip,
+  Headphones,
+  ScreenShare,
+  Video,
+  VideoOff,
+  Maximize2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AttachmentPreview } from "@/components/attachment-preview";
@@ -81,20 +86,145 @@ function Avatar({
 }: {
   seed: string;
   label: string;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl";
 }) {
   const dims =
     size === "sm"
       ? "h-7 w-7 text-xs"
       : size === "lg"
         ? "h-16 w-16 text-2xl"
-        : "h-9 w-9 text-sm";
+        : size === "xl"
+          ? "h-20 w-20 text-3xl"
+          : "h-9 w-9 text-sm";
   return (
     <span
       className={`flex flex-none items-center justify-center rounded-full bg-gradient-to-br font-semibold text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.3)_inset] ${dims} ${avatarRamp(seed)}`}
     >
       {initialOf(label)}
     </span>
+  );
+}
+
+// Lightweight, UI-layer-only speaking detector: attaches a Web Audio
+// AnalyserNode to a MediaStream's audio track and polls its volume via
+// requestAnimationFrame, exposing a simple boolean once it crosses a
+// threshold. This is purely presentational (drives the green speaking
+// ring) and never touches voice-context.tsx's signaling/track logic —
+// it just reads from the same MediaStream objects that are already
+// exposed on voice state.
+function useIsSpeaking(stream: MediaStream | null | undefined, muted = false): boolean {
+  const [speaking, setSpeaking] = useState(false);
+
+  useEffect(() => {
+    if (!stream || muted || stream.getAudioTracks().length === 0) {
+      setSpeaking(false);
+      return;
+    }
+    let raf = 0;
+    let cancelled = false;
+    const AudioContextCtor =
+      window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return;
+    const ctx = new AudioContextCtor();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.6;
+    const source = ctx.createMediaStreamSource(stream);
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    const tick = () => {
+      if (cancelled) return;
+      analyser.getByteFrequencyData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i];
+      const avg = sum / data.length;
+      setSpeaking(avg > 12);
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      source.disconnect();
+      analyser.disconnect();
+      void ctx.close();
+    };
+  }, [stream, muted]);
+
+  return speaking;
+}
+
+// One participant's tile in the voice-channel grid: video feed when the
+// camera is on, otherwise a large avatar — with a speaking ring/pulse
+// (green, matching the app's existing "in voice"/online accents) and a
+// bottom-left name + mute badge, matching Discord's call grid layout.
+function VoiceTile({
+  seed,
+  label,
+  stream,
+  isLocal = false,
+  micMuted = false,
+  deafened = false,
+}: {
+  seed: string;
+  label: string;
+  stream: MediaStream | null | undefined;
+  isLocal?: boolean;
+  micMuted?: boolean;
+  deafened?: boolean;
+}) {
+  const speaking = useIsSpeaking(stream, micMuted || (deafened && !isLocal));
+  const hasVideo = !!stream?.getVideoTracks().length;
+
+  return (
+    <div
+      data-speaking={speaking}
+      className="group relative flex aspect-video min-h-[140px] flex-col items-center justify-center overflow-hidden rounded-xl border border-[#2A2F3A] bg-[#12151B] shadow-[0_1px_0_rgba(255,255,255,0.03)_inset] ring-2 ring-transparent transition-all duration-150 data-[speaking=true]:border-[#4ADE80]/60 data-[speaking=true]:ring-[#4ADE80]/70 data-[speaking=true]:shadow-[0_0_0_3px_rgba(74,222,128,0.15)]"
+    >
+      {hasVideo && stream ? (
+        // eslint-disable-next-line jsx-a11y/media-has-caption -- voice call video, no captions applicable
+        <video
+          autoPlay
+          playsInline
+          muted={isLocal}
+          className="absolute inset-0 h-full w-full object-cover"
+          ref={(el) => {
+            if (el && el.srcObject !== stream) el.srcObject = stream;
+          }}
+        />
+      ) : (
+        <div className="flex flex-col items-center gap-2">
+          <span
+            data-speaking={speaking}
+            className="rounded-full p-1 ring-2 ring-transparent transition-all duration-150 data-[speaking=true]:animate-speaking-pulse data-[speaking=true]:ring-[#4ADE80]"
+          >
+            <Avatar seed={seed} label={label} size="xl" />
+          </span>
+        </div>
+      )}
+
+      {stream && !isLocal && (
+        // eslint-disable-next-line jsx-a11y/media-has-caption -- remote voice audio, no captions applicable
+        <audio
+          autoPlay
+          muted={deafened}
+          ref={(el) => {
+            if (el && el.srcObject !== stream) el.srcObject = stream;
+          }}
+        />
+      )}
+
+      <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1.5 rounded-md bg-black/55 px-2 py-1 backdrop-blur-sm">
+        {micMuted ? (
+          <MicOff className="size-3.5 flex-none text-[#EB5757]" />
+        ) : (
+          <Mic className="size-3.5 flex-none text-[#8B93A1]" />
+        )}
+        <span className="max-w-[10rem] truncate text-xs font-medium text-[#E8EAED]">{label}</span>
+      </div>
+    </div>
   );
 }
 
@@ -153,6 +283,11 @@ export function GuildView({
   const [detail, setDetail] = useState<GuildDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [activeChannelId, setActiveChannelId] = useState<string | null>(null);
+  // Deafen is a pure UI/local-playback concept (mute incoming audio
+  // elements) — it doesn't exist in voice-context.tsx's state and doesn't
+  // need to; it never touches the mic track or signaling, just whether we
+  // render remote <audio>/<video> elements muted on our end.
+  const [deafened, setDeafened] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [messagesByChannel, setMessagesByChannel] = useState<Record<string, GuildMessage[]>>({});
   const [composer, setComposer] = useState("");
@@ -844,16 +979,53 @@ export function GuildView({
         </div>
 
         {voice.channelId && (
-          <div className="flex flex-none items-center gap-2 border-t border-[#1D2129] bg-[#0B0D12]/60 px-2.5 py-2.5">
-            <span className="min-w-0 flex-1 truncate text-xs text-[#4ADE80]">
-              Voice Connected
-            </span>
-            <Button size="icon-sm" variant="ghost" onClick={toggleMic} title={voice.micMuted ? "Unmute" : "Mute"}>
-              {voice.micMuted ? <MicOff className="size-4" /> : <Mic className="size-4" />}
-            </Button>
-            <Button size="icon-sm" variant="ghost" onClick={leaveVoiceChannel} title="Disconnect">
-              <PhoneOff className="size-4 text-[#EB5757]" />
-            </Button>
+          <div className="flex flex-none flex-col gap-2 border-t border-[#1D2129] bg-[#0B0D12]/60 px-2.5 py-2 pb-2.5">
+            {/* Compact "connected to voice" pill — always shown while in a
+                call, regardless of whether the voice channel view itself is
+                focused, matching Discord's persistent call bar at the
+                bottom of the channel sidebar. Clicking it jumps back to the
+                voice channel view. */}
+            <button
+              onClick={() => setActiveChannelId(voice.channelId)}
+              className="flex min-w-0 items-center gap-2 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-[#1B1F27]"
+              title={inVoiceChannel ? "Voice channel open" : "Return to voice channel"}
+            >
+              <span className="relative flex size-2 flex-none">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#4ADE80] opacity-60" />
+                <span className="relative inline-flex size-2 rounded-full bg-[#4ADE80]" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-xs font-semibold text-[#4ADE80]">Voice Connected</span>
+                <span className="block truncate text-[11px] text-[#8B93A1]">
+                  {detail.channels.find((c) => c.id === voice.channelId)?.name ?? "Voice channel"}
+                </span>
+              </span>
+              {!inVoiceChannel && <Maximize2 className="size-3.5 flex-none text-[#8B93A1]" />}
+            </button>
+            <div className="flex items-center justify-between gap-1">
+              <Button size="icon-sm" variant="ghost" onClick={toggleMic} title={voice.micMuted ? "Unmute" : "Mute"}>
+                {voice.micMuted ? <MicOff className="size-4 text-[#EB5757]" /> : <Mic className="size-4" />}
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={() => setDeafened((v) => !v)}
+                title={deafened ? "Undeafen" : "Deafen"}
+              >
+                <Headphones className={`size-4 ${deafened ? "text-[#EB5757]" : ""}`} />
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={() => void toggleCamera()}
+                title={voice.cameraOn ? "Turn Camera Off" : "Turn Camera On"}
+              >
+                {voice.cameraOn ? <Video className="size-4 text-[#F0A868]" /> : <VideoOff className="size-4" />}
+              </Button>
+              <Button size="icon-sm" variant="ghost" onClick={leaveVoiceChannel} title="Disconnect">
+                <PhoneOff className="size-4 text-[#EB5757]" />
+              </Button>
+            </div>
           </div>
         )}
       </div>
@@ -1124,91 +1296,96 @@ export function GuildView({
             <div className="flex h-16 flex-none items-center gap-2 border-b border-[#1D2129] px-4">
               <Volume2 className="size-5 text-[#8B93A1]" />
               <span className="text-sm font-semibold text-[#E8EAED]">{activeChannel.name}</span>
-            </div>
-
-            <div className="flex flex-1 flex-col items-center justify-center gap-6 p-8">
-              {!inVoiceChannel ? (
-                <>
-                  <Volume2 className="size-12 text-[#8B93A1]/40" />
-                  <p className="text-sm text-[#8B93A1]">Not connected to this voice channel</p>
-                  <Button onClick={() => void joinVoiceChannel(guildId, activeChannel.id)}>
-                    Join Voice
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <div className="grid w-full max-w-2xl grid-cols-2 gap-4 sm:grid-cols-3">
-                    <div className="flex flex-col items-center gap-2 rounded-xl border border-[#2A2F3A] bg-[#12151B] p-4">
-                      {voice.cameraOn && voice.localStream ? (
-                        // eslint-disable-next-line jsx-a11y/media-has-caption -- local self-view, no captions applicable
-                        <video
-                          autoPlay
-                          playsInline
-                          muted
-                          className="h-16 w-full rounded-lg object-cover"
-                          ref={(el) => {
-                            if (el && el.srcObject !== voice.localStream) el.srcObject = voice.localStream;
-                          }}
-                        />
-                      ) : (
-                        <Avatar seed={myId ?? "me"} label="You" size="lg" />
-                      )}
-                      <span className="text-sm text-[#E8EAED]">
-                        You {voice.micMuted && "(muted)"}
-                      </span>
-                    </div>
-                    {Object.entries(voice.peers).map(([userId, peer]) => {
-                      const hasVideo = !!peer.stream?.getVideoTracks().length;
-                      return (
-                        <div
-                          key={userId}
-                          className="flex flex-col items-center gap-2 rounded-xl border border-[#2A2F3A] bg-[#12151B] p-4"
-                        >
-                          {hasVideo && peer.stream ? (
-                            // eslint-disable-next-line jsx-a11y/media-has-caption -- remote voice video, no captions applicable
-                            <video
-                              autoPlay
-                              playsInline
-                              className="h-16 w-full rounded-lg object-cover"
-                              ref={(el) => {
-                                if (el && el.srcObject !== peer.stream) el.srcObject = peer.stream;
-                              }}
-                            />
-                          ) : (
-                            <Avatar seed={userId} label={nameFor(userId)} size="lg" />
-                          )}
-                          <span className="truncate text-sm text-[#E8EAED]">{nameFor(userId)}</span>
-                          <span className="font-mono text-[9px] uppercase tracking-wide text-[#8B93A1]">
-                            {peer.connectionState}
-                          </span>
-                          {peer.stream && (
-                            // eslint-disable-next-line jsx-a11y/media-has-caption -- remote voice audio, no captions applicable
-                            <audio
-                              autoPlay
-                              ref={(el) => {
-                                if (el && el.srcObject !== peer.stream) el.srcObject = peer.stream;
-                              }}
-                            />
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <Button variant="secondary" onClick={toggleMic}>
-                      {voice.micMuted ? <MicOff className="size-4" /> : <Mic className="size-4" />}
-                      {voice.micMuted ? "Unmute" : "Mute"}
-                    </Button>
-                    <Button variant="secondary" onClick={() => void toggleCamera()}>
-                      {voice.cameraOn ? "Turn Camera Off" : "Turn Camera On"}
-                    </Button>
-                    <Button variant="destructive" onClick={leaveVoiceChannel}>
-                      <LogOut className="size-4" /> Disconnect
-                    </Button>
-                  </div>
-                </>
+              {inVoiceChannel && (
+                <span className="ml-2 flex items-center gap-1 rounded-full bg-[#4ADE80]/10 px-2 py-0.5 text-[11px] font-medium text-[#4ADE80]">
+                  <span className="size-1.5 rounded-full bg-[#4ADE80]" /> Connected
+                </span>
               )}
             </div>
+
+            {!inVoiceChannel ? (
+              <div className="flex flex-1 flex-col items-center justify-center gap-6 p-8">
+                <Volume2 className="size-12 text-[#8B93A1]/40" />
+                <p className="text-sm text-[#8B93A1]">Not connected to this voice channel</p>
+                <Button onClick={() => void joinVoiceChannel(guildId, activeChannel.id)}>
+                  Join Voice
+                </Button>
+              </div>
+            ) : (
+              <div className="relative flex flex-1 flex-col overflow-hidden bg-[#0F1217]">
+                {/* Participant grid — Discord-style: video tile or
+                    avatar-with-speaking-ring per person, auto-fitting the
+                    available space instead of a fixed column count. */}
+                <div className="noschat-scroll flex-1 overflow-y-auto p-4 pb-28">
+                  <div
+                    className="grid h-full auto-rows-fr gap-3"
+                    style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}
+                  >
+                    <VoiceTile
+                      seed={myId ?? "me"}
+                      label="You"
+                      stream={voice.localStream}
+                      isLocal
+                      micMuted={voice.micMuted}
+                    />
+                    {Object.entries(voice.peers).map(([userId, peer]) => (
+                      <VoiceTile
+                        key={userId}
+                        seed={userId}
+                        label={nameFor(userId)}
+                        stream={peer.stream}
+                        micMuted={peer.connectionState !== "connected"}
+                        deafened={deafened}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                {/* Fixed bottom control bar — always visible over the grid,
+                    matching Discord's call controls (mute, deafen, camera,
+                    screen-share, disconnect). */}
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-5">
+                  <div className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-white/[0.06] bg-[#1B1F27]/95 px-3 py-2.5 shadow-[0_12px_40px_-10px_rgba(0,0,0,0.6)] backdrop-blur-sm">
+                    <Button
+                      size="icon-lg"
+                      variant={voice.micMuted ? "destructive" : "secondary"}
+                      onClick={toggleMic}
+                      title={voice.micMuted ? "Unmute" : "Mute"}
+                    >
+                      {voice.micMuted ? <MicOff className="size-4" /> : <Mic className="size-4" />}
+                    </Button>
+                    <Button
+                      size="icon-lg"
+                      variant={deafened ? "destructive" : "secondary"}
+                      onClick={() => setDeafened((v) => !v)}
+                      title={deafened ? "Undeafen" : "Deafen"}
+                    >
+                      <Headphones className="size-4" />
+                    </Button>
+                    <Button
+                      size="icon-lg"
+                      variant={voice.cameraOn ? "default" : "secondary"}
+                      onClick={() => void toggleCamera()}
+                      title={voice.cameraOn ? "Turn Camera Off" : "Turn Camera On"}
+                    >
+                      {voice.cameraOn ? <Video className="size-4" /> : <VideoOff className="size-4" />}
+                    </Button>
+                    <Button
+                      size="icon-lg"
+                      variant="secondary"
+                      disabled
+                      title="Screen share (coming soon)"
+                    >
+                      <ScreenShare className="size-4" />
+                    </Button>
+                    <div className="mx-1 h-6 w-px bg-white/[0.08]" />
+                    <Button size="icon-lg" variant="destructive" onClick={leaveVoiceChannel} title="Disconnect">
+                      <PhoneOff className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
