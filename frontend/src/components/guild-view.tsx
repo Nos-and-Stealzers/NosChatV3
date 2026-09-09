@@ -8,6 +8,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -33,6 +34,7 @@ import {
   ArrowUp,
   ArrowDown,
   Paperclip,
+  Smile,
   Headphones,
   ScreenShare,
   Video,
@@ -49,6 +51,7 @@ import { Button } from "@/components/ui/button";
 import { AttachmentPreview } from "@/components/attachment-preview";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
+import { EmojiPicker } from "@/components/emoji-picker";
 import { avatarRamp, initialOf } from "@/lib/utils";
 import {
   getGuild,
@@ -61,6 +64,9 @@ import {
   createGuildChannel,
   createGuildCategory,
   deleteGuildChannel,
+  listGuildEmoji,
+  guildEmojiUrl,
+  type GuildEmoji,
   updateGuildChannel,
   leaveGuild,
   deleteGuild,
@@ -331,6 +337,74 @@ export function GuildView({
   const headerMenuRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const [guildEmoji, setGuildEmoji] = useState<GuildEmoji[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const token = await getToken();
+      if (!token) return;
+      try {
+        const list = await listGuildEmoji(token, guildId);
+        if (!cancelled) setGuildEmoji(list);
+      } catch {
+        // Non-fatal — the picker just shows no "Server" tab.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [getToken, guildId]);
+
+  useEffect(() => {
+    if (!emojiPickerOpen) return;
+    function onClick(e: MouseEvent) {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+        setEmojiPickerOpen(false);
+      }
+    }
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [emojiPickerOpen]);
+
+  function insertEmoji(char: string) {
+    setComposer((prev) => `${prev}${char} `);
+    composerRef.current?.focus();
+  }
+
+  // Resolves `:emoji_name:` shortcodes in message text to inline custom
+  // emoji images (falls back to literal text if the name isn't a known
+  // emoji in this guild — same as Discord leaving unknown shortcodes as
+  // plain text).
+  const emojiByName = useMemo(() => {
+    const map = new Map<string, GuildEmoji>();
+    for (const em of guildEmoji) map.set(em.name, em);
+    return map;
+  }, [guildEmoji]);
+
+  function renderMessageContent(content: string) {
+    if (emojiByName.size === 0 || !content.includes(":")) return content;
+    const parts = content.split(/(:[a-zA-Z0-9_]{2,32}:)/g);
+    if (parts.length === 1) return content;
+    return parts.map((part, i) => {
+      const match = /^:([a-zA-Z0-9_]{2,32}):$/.exec(part);
+      const em = match ? emojiByName.get(match[1]) : undefined;
+      if (em) {
+        return (
+          <img
+            key={i}
+            src={guildEmojiUrl(guildId, em.id)}
+            alt={part}
+            title={part}
+            className="inline-block size-5 -translate-y-0.5 align-middle object-contain"
+          />
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  }
 
   // Create-channel / create-category modal state. `addChannelCategoryId` is
   // undefined when the modal is closed, null for "no category" (top-level),
@@ -1451,7 +1525,7 @@ export function GuildView({
                             </div>
                           ) : (
                             <p className="whitespace-pre-wrap text-sm leading-relaxed break-words text-[#C7CDD6]">
-                              {m.content}
+                              {renderMessageContent(m.content)}
                             </p>
                           )}
                           {m.attachment && (
@@ -1539,8 +1613,29 @@ export function GuildView({
                   }}
                   onKeyDown={handleComposerKeyDown}
                   placeholder={`Message #${activeChannel.name}`}
-                  className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-12 pl-11 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"
+                  className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-20 pl-11 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"
                 />
+                <div ref={emojiPickerRef} className="absolute right-10 bottom-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setEmojiPickerOpen((v) => !v)}
+                    title="Insert emoji"
+                    className={`flex size-8 items-center justify-center rounded-full transition-colors hover:bg-[#1B1F27] ${emojiPickerOpen ? "bg-[#1B1F27] text-[#F0A868]" : "text-[#8B93A1] hover:text-[#E8EAED]"}`}
+                  >
+                    <Smile className="size-4" />
+                  </button>
+                  {emojiPickerOpen && (
+                    <div className="animate-rise-in absolute bottom-11 right-0 z-50">
+                      <EmojiPicker
+                        onPick={(char) => {
+                          insertEmoji(char);
+                          setEmojiPickerOpen(false);
+                        }}
+                        customEmoji={guildEmoji.map((em) => ({ id: em.id, name: em.name, url: guildEmojiUrl(guildId, em.id) }))}
+                      />
+                    </div>
+                  )}
+                </div>
                 <Button
                   type="submit"
                   size="icon"

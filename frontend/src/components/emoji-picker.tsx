@@ -438,7 +438,16 @@ export function recordRecentEmoji(char: string) {
 // large curated native-Unicode set (no external library dependency) plus
 // a "Recent" tab backed by localStorage. Used for both the composer's
 // insert-emoji button and (via the same component) message reactions.
-export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
+// Optionally takes a guild's custom emoji (name + image URL) to show in
+// a dedicated "Server" tab — picking one inserts the `:name:` shortcode
+// text into the composer (resolved to an <img> at render time).
+export function EmojiPicker({
+  onPick,
+  customEmoji,
+}: {
+  onPick: (emoji: string) => void;
+  customEmoji?: { id: string; name: string; url: string }[];
+}) {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState(CATEGORIES[0].id);
   const recents = useMemo(() => loadRecents(), []);
@@ -451,6 +460,7 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
     if (activeCategory === "recent") {
       return recents.map((char) => ({ char, keywords: "" }));
     }
+    if (activeCategory === "server") return [];
     return CATEGORIES.find((c) => c.id === activeCategory)?.emojis ?? [];
   }, [query, activeCategory, recents]);
 
@@ -496,10 +506,39 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
               {c.label}
             </button>
           ))}
+          {customEmoji && customEmoji.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setActiveCategory("server")}
+              data-active={activeCategory === "server"}
+              className="flex-none rounded-md px-2 py-1 text-[10px] font-medium text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED] data-[active=true]:bg-[#1E232C] data-[active=true]:text-[#F0A868]"
+            >
+              Server
+            </button>
+          )}
         </div>
       )}
       <div className="noschat-scroll flex-1 overflow-y-auto p-2">
-        {results.length === 0 ? (
+        {activeCategory === "server" && !query.trim() ? (
+          customEmoji && customEmoji.length > 0 ? (
+            <div className="grid grid-cols-6 gap-1">
+              {customEmoji.map((em) => (
+                <button
+                  key={em.id}
+                  type="button"
+                  onClick={() => pick(`:${em.name}:`)}
+                  title={`:${em.name}:`}
+                  className="flex size-9 items-center justify-center rounded-md p-1 transition-colors hover:bg-[#1B1F27]"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element -- backend-hosted small inline blob */}
+                  <img src={em.url} alt={em.name} className="size-full object-contain" />
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="p-2 text-center text-xs text-[#8B93A1]">No custom emoji in this server</p>
+          )
+        ) : results.length === 0 ? (
           <p className="p-2 text-center text-xs text-[#8B93A1]">No emoji found</p>
         ) : (
           <div className="grid grid-cols-8 gap-0.5">
