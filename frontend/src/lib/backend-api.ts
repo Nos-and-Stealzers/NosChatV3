@@ -695,6 +695,12 @@ export function listPinnedMessages(token: string, guildId: string, channelId: st
   return req<GuildMessage[]>(`/guilds/${guildId}/channels/${channelId}/pins`, token);
 }
 
+export function searchGuildMessages(token: string, guildId: string, q: string, channelId?: string) {
+  const params = new URLSearchParams({ q });
+  if (channelId) params.set("channel_id", channelId);
+  return req<GuildMessage[]>(`/guilds/${guildId}/messages/search?${params.toString()}`, token);
+}
+
 export type AuditLogEntry = {
   id: string;
   actor_id: string | null;

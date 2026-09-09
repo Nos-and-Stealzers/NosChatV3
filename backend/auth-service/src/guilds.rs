@@ -1491,7 +1491,70 @@ pub async fn list_channel_messages(
     Ok(Json(rows.into_iter().map(GuildMessageView::from).collect()))
 }
 
-/// `POST /guilds/:id/channels/:channel_id/messages` — multipart form:
+#[derive(Deserialize)]
+pub struct SearchMessagesQuery {
+    pub q: String,
+    pub channel_id: Option<Uuid>,
+}
+
+/// `GET /guilds/:id/messages/search?q=...&channel_id=...` — full-text-ish
+/// search (simple ILIKE, no tsvector index — this app's message volume
+/// doesn't warrant one yet) across every text channel in the guild the
+/// caller can actually view. Optional channel_id narrows to one channel.
+/// Capped at 50 results, newest first, matching list_channel_messages'
+/// existing cap.
+pub async fn search_guild_messages(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<SearchMessagesQuery>,
+) -> Result<Json<Vec<GuildMessageView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_VIEW_CHANNELS).await?;
+
+    let term = q.q.trim();
+    if term.is_empty() {
+        return Ok(Json(vec![]));
+    }
+    let pattern = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
+
+    let rows: Vec<GuildMessageRow> = if let Some(channel_id) = q.channel_id {
+        assert_text_channel(&state, guild_id, channel_id).await?;
+        sqlx::query_as(
+            r#"
+            SELECT id, channel_id, sender_id, content, created_at, edited_at, pinned_at,
+                   attachment_mime, attachment_filename, attachment_size
+            FROM guild_messages
+            WHERE channel_id = $1 AND content ILIKE $2
+            ORDER BY created_at DESC LIMIT 50
+            "#,
+        )
+        .bind(channel_id)
+        .bind(&pattern)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT gm.id, gm.channel_id, gm.sender_id, gm.content, gm.created_at, gm.edited_at, gm.pinned_at,
+                   gm.attachment_mime, gm.attachment_filename, gm.attachment_size
+            FROM guild_messages gm
+            JOIN guild_channels gc ON gc.id = gm.channel_id
+            WHERE gc.guild_id = $1 AND gm.content ILIKE $2
+            ORDER BY gm.created_at DESC LIMIT 50
+            "#,
+        )
+        .bind(guild_id)
+        .bind(&pattern)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?
+    };
+
+    Ok(Json(rows.into_iter().map(GuildMessageView::from).collect()))
+}
+
 /// `content` text field (may be empty only if `file` is present) plus an
 /// optional `file` field. Persists then fans out to every online guild
 /// member over the WS hub. Requires SEND_MESSAGES.

@@ -211,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
             "/guilds/{id}/channels/{channel_id}/messages",
             get(guilds::list_channel_messages).post(guilds::send_channel_message),
         )
+        .route("/guilds/{id}/messages/search", get(guilds::search_guild_messages))
         .route(
             "/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}",
             axum::routing::patch(guilds::edit_channel_message).delete(guilds::delete_channel_message),

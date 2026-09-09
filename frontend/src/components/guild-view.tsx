@@ -43,6 +43,7 @@ import {
   Pin,
   PinOff,
   Timer,
+  Search,
 } from "lucide-react";
 import { useContextMenuHandler } from "@/lib/context-menu";
 import { Button } from "@/components/ui/button";
@@ -74,6 +75,7 @@ import {
   pinGuildMessage,
   unpinGuildMessage,
   listPinnedMessages,
+  searchGuildMessages,
   type GuildDetail,
   type GuildChannel,
   type GuildMessage,
@@ -354,6 +356,12 @@ export function GuildView({
   const [leaveOrDeleteOpen, setLeaveOrDeleteOpen] = useState(false);
   const [leavingOrDeleting, setLeavingOrDeleting] = useState(false);
   const [leaveOrDeleteError, setLeaveOrDeleteError] = useState<string | null>(null);
+
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<GuildMessage[]>([]);
+  const [searching, setSearching] = useState(false);
+
 
   // Inline edit state for guild text messages — same pattern as chat-app.tsx's
   // DM message editing.
@@ -774,6 +782,23 @@ export function GuildView({
       );
     } finally {
       setLeavingOrDeleting(false);
+    }
+  }
+
+  async function handleSearch() {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    setSearching(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      setSearchResults(await searchGuildMessages(token, guildId, searchQuery.trim()));
+    } catch {
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
     }
   }
 
@@ -1210,6 +1235,15 @@ export function GuildView({
                 </span>
               )}
               <div className="flex-1" />
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={() => setSearchOpen(true)}
+                title="Search messages"
+                className="text-[#8B93A1]"
+              >
+                <Search className="size-4" />
+              </Button>
               <Button
                 size="icon-sm"
                 variant="ghost"
@@ -1748,6 +1782,62 @@ export function GuildView({
         </div>
       )}
 
+      {searchOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-start justify-center bg-black/75 p-4 pt-20 backdrop-blur-[2px]"
+          onClick={() => setSearchOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl border border-[#1D2129] bg-[#161A20] p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <Search className="size-4 flex-none text-[#8B93A1]" />
+              <Input
+                autoFocus
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleSearch();
+                  if (e.key === "Escape") setSearchOpen(false);
+                }}
+                placeholder="Search messages in this server…"
+                className="h-9 flex-1 rounded-lg border-[#2A2F3A] bg-[#0F1217]/80 text-sm text-[#E8EAED]"
+              />
+              <Button size="sm" onClick={() => void handleSearch()} disabled={searching}>
+                {searching ? "…" : "Search"}
+              </Button>
+            </div>
+            <div className="mt-3 max-h-[50vh] space-y-1.5 overflow-y-auto">
+              {searching && <p className="py-4 text-center text-sm text-[#8B93A1]">Searching…</p>}
+              {!searching && searchQuery.trim() && searchResults.length === 0 && (
+                <p className="py-4 text-center text-sm text-[#8B93A1]">No messages found.</p>
+              )}
+              {searchResults.map((m) => {
+                const ch = detail?.channels.find((c) => c.id === m.channel_id);
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => {
+                      if (ch) selectChannel(ch);
+                      setSearchOpen(false);
+                    }}
+                    className="block w-full rounded-lg border border-[#1D2129] bg-[#12151B] px-3 py-2 text-left transition-colors hover:border-[#3A4050]"
+                  >
+                    <p className="flex items-center gap-1.5 text-xs text-[#8B93A1]">
+                      <Hash className="size-3" />
+                      {ch?.name ?? "unknown-channel"}
+                      <span className="text-[#5A6272]">·</span>
+                      <span className="font-medium text-[#C7CDD6]">{nameFor(m.sender_id)}</span>
+                    </p>
+                    <p className="mt-0.5 truncate text-sm text-[#E8EAED]">{m.content}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
       {editingChannel && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
