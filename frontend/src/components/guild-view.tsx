@@ -277,7 +277,7 @@ export function GuildView({
 }) {
   const { getToken } = useAuth();
   const { subscribe } = useRealtime();
-  const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera } = useVoice();
+  const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare } = useVoice();
   const { statusOf, fetchProfile } = usePresence();
 
   const [detail, setDetail] = useState<GuildDetail | null>(null);
@@ -1372,9 +1372,9 @@ export function GuildView({
                     </Button>
                     <Button
                       size="icon-lg"
-                      variant="secondary"
-                      disabled
-                      title="Screen share (coming soon)"
+                      variant={voice.screenSharing ? "default" : "secondary"}
+                      onClick={() => void toggleScreenShare()}
+                      title={voice.screenSharing ? "Stop Screen Share" : "Share Screen"}
                     >
                       <ScreenShare className="size-4" />
                     </Button>

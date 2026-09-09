@@ -46,6 +46,7 @@ export type VoiceState = {
   peers: Record<string /* user_id */, VoicePeerState>;
   micMuted: boolean;
   cameraOn: boolean;
+  screenSharing: boolean;
   localStream: MediaStream | null;
 };
 
@@ -55,6 +56,7 @@ const IDLE_STATE: VoiceState = {
   peers: {},
   micMuted: false,
   cameraOn: false,
+  screenSharing: false,
   localStream: null,
 };
 
@@ -77,6 +79,7 @@ type VoiceContextValue = {
   leaveVoiceChannel: () => void;
   toggleMic: () => void;
   toggleCamera: () => Promise<void>;
+  toggleScreenShare: () => Promise<void>;
 };
 
 const VoiceContext = createContext<VoiceContextValue | null>(null);
@@ -103,6 +106,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
   const peersRef = useRef<Record<string, PeerSession>>({});
   const micMutedRef = useRef(false);
   const cameraOnRef = useRef(false);
+  const screenSharingRef = useRef(false);
 
   const buildAudioConstraints = useCallback((): MediaTrackConstraints | boolean => {
     const s = settingsRef.current;
@@ -143,6 +147,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     guildIdRef.current = null;
     micMutedRef.current = false;
     cameraOnRef.current = false;
+    screenSharingRef.current = false;
     setVoice(IDLE_STATE);
   }, [teardownPeer]);
 
@@ -274,6 +279,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           peers: {},
           micMuted: micMutedRef.current,
           cameraOn: false,
+          screenSharing: false,
           localStream: stream,
         });
         sendGuildSignal({ type: "voice_join", channel_id: channelId });
@@ -378,6 +384,84 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     }
   }, [renegotiateAllPeers]);
 
+  // Screen share reuses the SAME video track "slot" as the camera (mutually
+  // exclusive — matches most lightweight WebRTC apps and keeps the peer
+  // renegotiation logic identical for both: at most one video track is ever
+  // sent at a time). Starting a share while the camera is on stops the
+  // camera first. The browser's native "Stop sharing" UI fires the track's
+  // own `onended` event, which we listen for to clean up automatically —
+  // without that, clicking the native stop button would leave stale local
+  // state claiming the share is still active.
+  const toggleScreenShare = useCallback(async () => {
+    const channelId = channelIdRef.current;
+    if (!channelId) return;
+
+    if (screenSharingRef.current) {
+      const stream = localStreamRef.current;
+      const videoTrack = stream?.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.stop();
+        stream?.removeTrack(videoTrack);
+      }
+      for (const session of Object.values(peersRef.current)) {
+        const sender = session.pc.getSenders().find((s) => s.track?.kind === "video");
+        if (sender) session.pc.removeTrack(sender);
+      }
+      screenSharingRef.current = false;
+      setVoice((prev) => ({ ...prev, screenSharing: false, localStream: localStreamRef.current }));
+      await renegotiateAllPeers(channelId);
+      return;
+    }
+
+    try {
+      // If the camera happens to be on, stop it first — only one video
+      // track slot is supported at a time, and starting a share should
+      // visibly replace whatever video was being sent, not stack on it.
+      if (cameraOnRef.current) {
+        const stream = localStreamRef.current;
+        const camTrack = stream?.getVideoTracks()[0];
+        if (camTrack) {
+          camTrack.stop();
+          stream?.removeTrack(camTrack);
+        }
+        for (const session of Object.values(peersRef.current)) {
+          const sender = session.pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender) session.pc.removeTrack(sender);
+        }
+        cameraOnRef.current = false;
+      }
+
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const [screenTrack] = displayStream.getVideoTracks();
+      const stream = localStreamRef.current;
+      if (stream) {
+        stream.addTrack(screenTrack);
+      } else {
+        localStreamRef.current = displayStream;
+      }
+      for (const session of Object.values(peersRef.current)) {
+        session.pc.addTrack(screenTrack, localStreamRef.current!);
+      }
+      // The browser's own "Stop sharing" bar/button ends the track directly
+      // (bypassing our button entirely) — this is the only way to hear
+      // about that and keep local state in sync.
+      screenTrack.onended = () => {
+        void toggleScreenShare();
+      };
+      screenSharingRef.current = true;
+      setVoice((prev) => ({
+        ...prev,
+        screenSharing: true,
+        cameraOn: false,
+        localStream: localStreamRef.current,
+      }));
+      await renegotiateAllPeers(channelId);
+    } catch (e) {
+      console.warn("voice: failed to start screen share", e);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renegotiateAllPeers]);
+
   useEffect(() => {
     return subscribe(async (event: RealtimeEvent) => {
       switch (event.type) {
@@ -468,7 +552,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <VoiceContext.Provider
-      value={{ voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera }}
+      value={{ voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare }}
     >
       {children}
     </VoiceContext.Provider>
