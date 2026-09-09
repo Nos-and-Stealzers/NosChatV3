@@ -36,6 +36,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AttachmentPreview } from "@/components/attachment-preview";
 import { GifPicker } from "@/components/gif-picker";
+import { EmojiPicker } from "@/components/emoji-picker";
 import { Textarea } from "@/components/ui/textarea";
 import { avatarRamp, initialOf } from "@/lib/utils";
 import {
@@ -79,14 +80,6 @@ import { AvatarWithStatus, StatusDot } from "@/components/status-dot";
 import { ProfileCard } from "@/components/profile-card";
 
 type View = { kind: "friends" } | { kind: "dm"; dmId: string } | { kind: "guild"; guildId: string };
-
-// A small, hardcoded emoji set for the composer's quick-insert picker —
-// intentionally not a full emoji library (no new dependency), just the
-// handful that cover most casual chat reactions.
-const QUICK_EMOJIS = [
-  "😀", "😂", "😅", "😍", "🤔", "😎", "😢", "😡",
-  "👍", "👎", "🙏", "🔥", "🎉", "❤️", "💀", "👀",
-];
 
 // Skeleton row for the DM list while the initial fetch is in flight —
 // matches the real row's geometry (avatar + two lines) so nothing jumps
@@ -1780,17 +1773,8 @@ export function ChatApp({
                       <Smile className="size-4" />
                     </button>
                     {emojiPickerOpen && (
-                      <div className="animate-rise-in absolute bottom-11 left-0 z-50 grid w-56 grid-cols-8 gap-0.5 rounded-xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-2 shadow-[0_0_0_1px_rgba(240,168,104,0.06),0_20px_50px_-15px_rgba(0,0,0,0.7)]">
-                        {QUICK_EMOJIS.map((emoji) => (
-                          <button
-                            key={emoji}
-                            type="button"
-                            onClick={() => insertEmoji(emoji)}
-                            className="flex size-6 items-center justify-center rounded-md text-base transition-colors hover:bg-[#1B1F27]"
-                          >
-                            {emoji}
-                          </button>
-                        ))}
+                      <div className="animate-rise-in absolute bottom-11 left-0 z-50">
+                        <EmojiPicker onPick={(emoji) => insertEmoji(emoji)} />
                       </div>
                     )}
                   </div>

@@ -1,15 +1,16 @@
 "use client";
 
-// Discord-style reaction pills + "add reaction" hover trigger. Generic over
-// a small curated emoji set (no picker library dependency) — matches the
-// existing QUICK_EMOJIS pattern already used for the composer in
-// chat-app.tsx. Toggling a pill or picking from the popover both call the
-// same `onToggle(emoji)`, mirroring the backend's toggle-react/unreact
-// semantics on POST .../reactions.
+// Discord-style reaction pills + "add reaction" hover trigger. A quick
+// strip of 6 common emoji (fast path, matches Discord's own hover-reveal
+// row) plus a "more" button that opens the full categorized/searchable
+// EmojiPicker for anything else. Toggling a pill, quick emoji, or picking
+// from the full picker all call the same `onToggle(emoji)`, mirroring the
+// backend's toggle-react/unreact semantics on POST .../reactions.
 
 import { useEffect, useRef, useState } from "react";
 import { SmilePlus } from "lucide-react";
 import type { ReactionSummary } from "@/lib/backend-api";
+import { EmojiPicker } from "@/components/emoji-picker";
 
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
 
@@ -26,6 +27,7 @@ export function ReactionBar({
   alwaysShowAdd?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [fullPickerOpen, setFullPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -33,6 +35,7 @@ export function ReactionBar({
     function onDocClick(e: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
         setPickerOpen(false);
+        setFullPickerOpen(false);
       }
     }
     document.addEventListener("mousedown", onDocClick);
@@ -79,20 +82,41 @@ export function ReactionBar({
           <SmilePlus className="size-3.5" />
         </button>
         {pickerOpen && (
-          <div className="animate-pop-in absolute bottom-8 left-0 z-30 flex gap-0.5 rounded-xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-1.5 shadow-[0_0_0_1px_rgba(240,168,104,0.06),0_16px_40px_-15px_rgba(0,0,0,0.7)]">
-            {REACTION_EMOJIS.map((emoji) => (
-              <button
-                key={emoji}
-                type="button"
-                onClick={() => {
+          <div className="animate-pop-in absolute bottom-8 left-0 z-30 flex flex-col gap-1.5">
+            {fullPickerOpen ? (
+              <EmojiPicker
+                onPick={(emoji) => {
                   onToggle(emoji);
                   setPickerOpen(false);
+                  setFullPickerOpen(false);
                 }}
-                className="flex size-7 items-center justify-center rounded-md text-base transition-colors hover:bg-[#1B1F27]"
-              >
-                {emoji}
-              </button>
-            ))}
+              />
+            ) : (
+              <div className="flex items-center gap-0.5 rounded-xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-1.5 shadow-[0_0_0_1px_rgba(240,168,104,0.06),0_16px_40px_-15px_rgba(0,0,0,0.7)]">
+                {REACTION_EMOJIS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => {
+                      onToggle(emoji);
+                      setPickerOpen(false);
+                    }}
+                    className="flex size-7 items-center justify-center rounded-md text-base transition-colors hover:bg-[#1B1F27]"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+                <div className="mx-0.5 h-5 w-px bg-white/[0.08]" />
+                <button
+                  type="button"
+                  onClick={() => setFullPickerOpen(true)}
+                  title="More emoji"
+                  className="flex size-7 items-center justify-center rounded-md text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED]"
+                >
+                  <SmilePlus className="size-3.5" />
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
