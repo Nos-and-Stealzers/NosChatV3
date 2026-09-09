@@ -387,6 +387,8 @@ export type GuildChannel = {
   kind: ChannelKind;
   topic: string | null;
   position: number;
+  slow_mode_seconds: number;
+  is_nsfw: boolean;
 };
 
 export type Role = {
@@ -583,7 +585,7 @@ export function updateGuildChannel(
   token: string,
   guildId: string,
   channelId: string,
-  patch: { name?: string; topic?: string; position?: number; category_id?: string | null },
+  patch: { name?: string; topic?: string; position?: number; category_id?: string | null; slow_mode_seconds?: number; is_nsfw?: boolean },
 ) {
   return req<GuildChannel>(`/guilds/${guildId}/channels/${channelId}`, token, {
     method: "PATCH",

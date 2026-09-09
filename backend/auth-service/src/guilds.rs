@@ -214,6 +214,8 @@ pub struct ChannelView {
     pub kind: String,
     pub position: i32,
     pub topic: Option<String>,
+    pub slow_mode_seconds: i32,
+    pub is_nsfw: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -686,7 +688,7 @@ pub async fn get_guild(
     .map_err(internal_err)?;
 
     let channels: Vec<ChannelView> = sqlx::query_as(
-        "SELECT id, guild_id, category_id, name, kind, position, topic FROM guild_channels WHERE guild_id = $1 ORDER BY position",
+        "SELECT id, guild_id, category_id, name, kind, position, topic, slow_mode_seconds, is_nsfw FROM guild_channels WHERE guild_id = $1 ORDER BY position",
     )
     .bind(guild_id)
     .fetch_all(&state.db)
@@ -1180,7 +1182,7 @@ pub async fn create_channel(
     let channel: ChannelView = sqlx::query_as(
         "INSERT INTO guild_channels (guild_id, category_id, name, kind, position)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, guild_id, category_id, name, kind, position, topic",
+         RETURNING id, guild_id, category_id, name, kind, position, topic, slow_mode_seconds, is_nsfw",
     )
     .bind(guild_id)
     .bind(body.category_id)
@@ -1200,6 +1202,8 @@ pub struct UpdateChannelBody {
     pub topic: Option<String>,
     pub position: Option<i32>,
     pub category_id: Option<Uuid>,
+    pub slow_mode_seconds: Option<i32>,
+    pub is_nsfw: Option<bool>,
 }
 
 /// `PATCH /guilds/:id/channels/:channel_id` — requires MANAGE_CHANNELS.
@@ -1220,14 +1224,22 @@ pub async fn update_channel(
     let me = local_user_id(&state, &claims.sub).await?;
     require_permission(&state, guild_id, me, PERM_MANAGE_CHANNELS).await?;
 
+    if let Some(secs) = body.slow_mode_seconds {
+        if !(0..=21600).contains(&secs) {
+            return Err(bad_request("slow_mode_seconds must be between 0 and 21600 (6 hours)"));
+        }
+    }
+
     let channel: Option<ChannelView> = sqlx::query_as(
         "UPDATE guild_channels SET
             name = COALESCE($3, name),
             topic = COALESCE($4, topic),
             position = COALESCE($5, position),
-            category_id = COALESCE($6, category_id)
+            category_id = COALESCE($6, category_id),
+            slow_mode_seconds = COALESCE($7, slow_mode_seconds),
+            is_nsfw = COALESCE($8, is_nsfw)
          WHERE id = $1 AND guild_id = $2
-         RETURNING id, guild_id, category_id, name, kind, position, topic",
+         RETURNING id, guild_id, category_id, name, kind, position, topic, slow_mode_seconds, is_nsfw",
     )
     .bind(channel_id)
     .bind(guild_id)
@@ -1235,6 +1247,8 @@ pub async fn update_channel(
     .bind(body.topic)
     .bind(body.position)
     .bind(body.category_id)
+    .bind(body.slow_mode_seconds)
+    .bind(body.is_nsfw)
     .fetch_optional(&state.db)
     .await
     .map_err(internal_err)?;
@@ -1364,6 +1378,39 @@ pub async fn send_channel_message(
     let me = local_user_id(&state, &claims.sub).await?;
     require_permission(&state, guild_id, me, PERM_SEND_MESSAGES).await?;
     assert_text_channel(&state, guild_id, channel_id).await?;
+
+    // Slow mode enforcement — real server-side rate limit, not just a UI
+    // hint. Members with MANAGE_MESSAGES bypass it (matches Discord: mods
+    // aren't rate-limited by a slow mode they can turn off anyway).
+    let (slow_mode_seconds,): (i32,) = sqlx::query_as(
+        "SELECT slow_mode_seconds FROM guild_channels WHERE id = $1",
+    )
+    .bind(channel_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal_err)?;
+    if slow_mode_seconds > 0 && !has_permission(&state, guild_id, me, PERM_MANAGE_MESSAGES).await.unwrap_or(false) {
+        let last_sent: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
+            "SELECT created_at FROM guild_messages
+             WHERE channel_id = $1 AND sender_id = $2
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(channel_id)
+        .bind(me)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+        if let Some((last_at,)) = last_sent {
+            let elapsed = (Utc::now() - last_at).num_seconds();
+            let remaining = slow_mode_seconds as i64 - elapsed;
+            if remaining > 0 {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({ "error": format!("slow mode: wait {remaining}s before sending again"), "retry_after": remaining })),
+                ));
+            }
+        }
+    }
 
     let mut content = String::new();
     let mut attachment: Option<(Vec<u8>, String, String)> = None;

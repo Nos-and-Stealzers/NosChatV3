@@ -42,6 +42,7 @@ import {
   Copy,
   Pin,
   PinOff,
+  Timer,
 } from "lucide-react";
 import { useContextMenuHandler } from "@/lib/context-menu";
 import { Button } from "@/components/ui/button";
@@ -339,6 +340,8 @@ export function GuildView({
   const [creatingCategory, setCreatingCategory] = useState(false);
 
   const [pendingDeleteChannel, setPendingDeleteChannel] = useState<GuildChannel | null>(null);
+  const [editingChannel, setEditingChannel] = useState<GuildChannel | null>(null);
+  const [channelSettingsSaving, setChannelSettingsSaving] = useState(false);
   const [deletingChannel, setDeletingChannel] = useState(false);
 
   const [leaveOrDeleteOpen, setLeaveOrDeleteOpen] = useState(false);
@@ -1020,6 +1023,8 @@ export function GuildView({
                             ...(canManageGuild
                               ? [
                                   { kind: "separator" as const },
+                                  { kind: "item" as const, label: "Channel Settings", icon: Settings, onSelect: () => setEditingChannel(ch) },
+                                  { kind: "separator" as const },
                                   { kind: "item" as const, label: "Move Up", icon: ArrowUp, onSelect: () => void handleMoveChannel(ch, "up") },
                                   { kind: "item" as const, label: "Move Down", icon: ArrowDown, onSelect: () => void handleMoveChannel(ch, "down") },
                                   { kind: "separator" as const },
@@ -1183,6 +1188,19 @@ export function GuildView({
                   <span className="mx-1 h-4 w-px bg-[#2A2F3A]" />
                   <span className="truncate text-xs text-[#8B93A1]">{activeChannel.topic}</span>
                 </>
+              )}
+              {activeChannel.slow_mode_seconds > 0 && (
+                <span
+                  className="flex flex-none items-center gap-1 rounded-full bg-[#F0A868]/10 px-2 py-0.5 text-[11px] text-[#F0A868]"
+                  title={`Slow mode: ${activeChannel.slow_mode_seconds}s between messages`}
+                >
+                  <Timer className="size-3" /> {activeChannel.slow_mode_seconds}s
+                </span>
+              )}
+              {activeChannel.is_nsfw && (
+                <span className="flex-none rounded-full bg-[#EB5757]/10 px-2 py-0.5 text-[10px] font-semibold text-[#EB5757]">
+                  NSFW
+                </span>
               )}
               <div className="flex-1" />
               <Button
@@ -1718,6 +1736,92 @@ export function GuildView({
                 {creatingCategory ? "Creating…" : "Create Category"}
               </Button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {editingChannel && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+          onClick={() => setEditingChannel(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="noschat-grain animate-rise-in relative w-full max-w-md overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.75)]"
+          >
+            <h3 className="mb-1 font-display text-xl italic text-[#E8EAED]">
+              #{editingChannel.name} Settings
+            </h3>
+            <p className="mb-4 text-xs text-[#8B93A1]">Real, server-enforced channel settings.</p>
+
+            <div className="space-y-4">
+              {editingChannel.kind === "text" && (
+                <>
+                  <div>
+                    <label className="mb-1 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                      Slow Mode
+                    </label>
+                    <select
+                      value={editingChannel.slow_mode_seconds}
+                      onChange={(e) => setEditingChannel({ ...editingChannel, slow_mode_seconds: Number(e.target.value) })}
+                      className="w-full rounded-lg border border-[#2A2F3A] bg-[#0F1217] px-3 py-2 text-sm text-[#E8EAED] outline-none focus:border-[#F0A868]/50"
+                    >
+                      <option value={0}>Off</option>
+                      <option value={5}>5 seconds</option>
+                      <option value={10}>10 seconds</option>
+                      <option value={15}>15 seconds</option>
+                      <option value={30}>30 seconds</option>
+                      <option value={60}>1 minute</option>
+                      <option value={300}>5 minutes</option>
+                      <option value={900}>15 minutes</option>
+                      <option value={3600}>1 hour</option>
+                      <option value={21600}>6 hours</option>
+                    </select>
+                    <p className="mt-1 text-[11px] text-[#8B93A1]">
+                      Members must wait between messages. Enforced by the server, not just the UI. Moderators bypass it.
+                    </p>
+                  </div>
+                  <label className="flex items-center gap-2.5">
+                    <input
+                      type="checkbox"
+                      checked={editingChannel.is_nsfw}
+                      onChange={(e) => setEditingChannel({ ...editingChannel, is_nsfw: e.target.checked })}
+                      className="size-4 rounded border-[#2A2F3A] bg-[#0F1217] accent-[#F0A868]"
+                    />
+                    <span className="text-sm text-[#E8EAED]">Age-Restricted (NSFW) Channel</span>
+                  </label>
+                </>
+              )}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setEditingChannel(null)}>
+                Cancel
+              </Button>
+              <Button
+                disabled={channelSettingsSaving}
+                onClick={async () => {
+                  setChannelSettingsSaving(true);
+                  try {
+                    const token = await getToken();
+                    if (token) {
+                      await updateGuildChannel(token, guildId, editingChannel.id, {
+                        slow_mode_seconds: editingChannel.slow_mode_seconds,
+                        is_nsfw: editingChannel.is_nsfw,
+                      });
+                      await refreshDetail();
+                    }
+                    setEditingChannel(null);
+                  } catch (err) {
+                    setLoadError(err instanceof Error ? err.message : "Failed to update channel");
+                  } finally {
+                    setChannelSettingsSaving(false);
+                  }
+                }}
+              >
+                {channelSettingsSaving ? "Saving…" : "Save Changes"}
+              </Button>
+            </div>
           </div>
         </div>
       )}
