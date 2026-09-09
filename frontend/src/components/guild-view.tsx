@@ -66,6 +66,8 @@ import {
   editGuildMessage,
   deleteGuildMessage,
   toggleGuildReaction,
+  kickGuildMember,
+  banGuildMember,
   type GuildDetail,
   type GuildChannel,
   type GuildMessage,
@@ -612,6 +614,28 @@ export function GuildView({
     }
   }
 
+  async function handleKickMember(userId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await kickGuildMember(token, guildId, userId);
+      setMembers((prev) => prev.filter((m) => m.user_id !== userId));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to kick member");
+    }
+  }
+
+  async function handleBanMember(userId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await banGuildMember(token, guildId, userId);
+      setMembers((prev) => prev.filter((m) => m.user_id !== userId));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to ban member");
+    }
+  }
+
   // Swaps this channel's position with its immediate up/down neighbor
   // *within the same category group* (same list groupChannels() already
   // sorts by position) — two PATCH calls, not a full drag-and-drop reorder,
@@ -764,6 +788,8 @@ export function GuildView({
   const myPerms = detail.my_permissions;
   const canManageGuild = hasPermission(myPerms, PERMISSIONS.MANAGE_GUILD);
   const canManageMessages = hasPermission(myPerms, PERMISSIONS.MANAGE_MESSAGES);
+  const canKickMembers = hasPermission(myPerms, PERMISSIONS.KICK_MEMBERS);
+  const canBanMembers = hasPermission(myPerms, PERMISSIONS.BAN_MEMBERS);
   const groups = groupChannels(detail.categories, detail.channels);
   const activeMessages = activeChannel ? (messagesByChannel[activeChannel.id] ?? []) : [];
   const inVoiceChannel = voice.channelId === activeChannel?.id;
@@ -1308,6 +1334,25 @@ export function GuildView({
                             <div
                               key={m.user_id}
                               className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-[#1B1F27]"
+                              onContextMenu={
+                                m.user_id === myId
+                                  ? undefined
+                                  : handleContextMenu(() => [
+                                      { kind: "label" as const, label },
+                                      { kind: "item" as const, label: "Copy User ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(m.user_id) },
+                                      ...(canKickMembers || canBanMembers
+                                        ? [
+                                            { kind: "separator" as const },
+                                            ...(canKickMembers
+                                              ? [{ kind: "item" as const, label: "Kick Member", danger: true, onSelect: () => void handleKickMember(m.user_id) }]
+                                              : []),
+                                            ...(canBanMembers
+                                              ? [{ kind: "item" as const, label: "Ban Member", danger: true, onSelect: () => void handleBanMember(m.user_id) }]
+                                              : []),
+                                          ]
+                                        : []),
+                                    ])
+                              }
                             >
                               <ClickableAvatar userId={m.user_id} label={label} size="sm" />
                               <span className="min-w-0 flex-1 truncate text-sm text-[#C7CDD6]">
