@@ -58,6 +58,7 @@ import {
   deleteDmMessage,
   toggleDmReaction,
   dmDisplayLabel,
+  renameGroupDm,
   type Friendship,
   type DmSummary,
   type Message,
@@ -995,6 +996,25 @@ export function ChatApp({
   const activeLabel = activeDm ? dmDisplayLabel(activeDm) : "?";
   const activeTyping = view.kind === "dm" && !!typingIn[view.dmId] && settings.showTypingIndicatorText;
 
+  const [renamingDm, setRenamingDm] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  async function handleRenameDm() {
+    if (!activeDm) return;
+    const token = await getToken();
+    if (!token) return;
+    const trimmed = renameDraft.trim();
+    try {
+      await renameGroupDm(token, activeDm.id, trimmed || null);
+      setDms((prev) =>
+        prev.map((d) => (d.id === activeDm.id ? { ...d, name: trimmed || null } : d)),
+      );
+    } catch {
+      // best-effort — leave the old name displayed on failure
+    } finally {
+      setRenamingDm(false);
+    }
+  }
+
   // Resolves a display label for whoever's on the other end of a call from
   // just their user id — checks the DM list first (covers the common case
   // of calling from within an open conversation), then falls back to the
@@ -1483,9 +1503,36 @@ export function ChatApp({
                 <Avatar seed={activeLabel} label={activeLabel} />
               )}
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold text-[#E8EAED]">
-                  {activeLabel}
-                </p>
+                {renamingDm ? (
+                  <input
+                    autoFocus
+                    value={renameDraft}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onBlur={() => void handleRenameDm()}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void handleRenameDm();
+                      if (e.key === "Escape") setRenamingDm(false);
+                    }}
+                    placeholder="Group name"
+                    className="h-6 w-full rounded border border-[#2A2F3A] bg-[#0F1217]/80 px-1.5 text-sm text-[#E8EAED] outline-none"
+                  />
+                ) : (
+                  <p className="flex items-center gap-1.5 truncate text-sm font-semibold text-[#E8EAED]">
+                    <span className="truncate">{activeLabel}</span>
+                    {activeDm?.is_group && (
+                      <button
+                        onClick={() => {
+                          setRenameDraft(activeDm.name ?? "");
+                          setRenamingDm(true);
+                        }}
+                        title="Rename group"
+                        className="flex-none text-[#8B93A1] transition-colors hover:text-[#F0A868]"
+                      >
+                        <Pencil className="size-3" />
+                      </button>
+                    )}
+                  </p>
+                )}
                 <p className="truncate text-xs text-[#8B93A1]">
                   {activeTyping ? (
                     <span className="text-[#F0A868]">typing…</span>
