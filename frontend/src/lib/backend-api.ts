@@ -137,6 +137,12 @@ export type ReactionSummary = { emoji: string; count: number; reacted_by_me: boo
 
 export type AttachmentMeta = { filename: string; mime: string; size: number };
 
+export type ReplyPreview = {
+  id: string;
+  sender_id: string;
+  content: string;
+};
+
 export type Message = {
   id: string;
   dm_id: string;
@@ -146,6 +152,8 @@ export type Message = {
   edited_at: string | null;
   reactions?: ReactionSummary[];
   attachment?: AttachmentMeta | null;
+  reply_to_message_id?: string | null;
+  reply_to?: ReplyPreview | null;
 };
 
 export function listDms(token: string) {
@@ -196,10 +204,11 @@ export function leaveGroupDm(token: string, dmId: string) {
 }
 
 
-export function sendMessage(token: string, dmId: string, content: string, file?: File) {
+export function sendMessage(token: string, dmId: string, content: string, file?: File, replyToMessageId?: string) {
   const form = new FormData();
   form.set("content", content);
   if (file) form.set("file", file);
+  if (replyToMessageId) form.set("reply_to_message_id", replyToMessageId);
   return req<Message>(`/dms/${dmId}/messages`, token, {
     method: "POST",
     body: form,
@@ -449,6 +458,8 @@ export type GuildMessage = {
   is_system?: boolean;
   reactions?: ReactionSummary[];
   attachment?: AttachmentMeta | null;
+  reply_to_message_id?: string | null;
+  reply_to?: ReplyPreview | null;
 };
 
 export type Invite = {
@@ -683,10 +694,12 @@ export function sendGuildMessage(
   channelId: string,
   content: string,
   file?: File,
+  replyToMessageId?: string,
 ) {
   const form = new FormData();
   form.set("content", content);
   if (file) form.set("file", file);
+  if (replyToMessageId) form.set("reply_to_message_id", replyToMessageId);
   return req<GuildMessage>(
     `/guilds/${guildId}/channels/${channelId}/messages`,
     token,

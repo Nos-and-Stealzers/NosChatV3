@@ -29,6 +29,7 @@ import {
   Inbox,
   ShieldCheck,
   Pencil,
+  Reply,
   Trash2,
   UserPlus,
   SmilePlus,
@@ -970,10 +971,12 @@ export function ChatApp({
     const content = composer.trim();
     const file = pendingFile;
     const dmId = view.dmId;
+    const replyToId = replyTarget?.id;
     setComposer("");
     setPendingFile(null);
+    setReplyTarget(null);
     try {
-      await sendMessage(token, dmId, content, file ?? undefined);
+      await sendMessage(token, dmId, content, file ?? undefined, replyToId);
       if (settingsRef.current.soundOnOwnSentMessage) {
         void sound.play("message");
       }
@@ -1022,6 +1025,7 @@ export function ChatApp({
   const activeTyping = view.kind === "dm" && !!typingIn[view.dmId] && settings.showTypingIndicatorText;
 
   const [renamingDm, setRenamingDm] = useState(false);
+  const [replyTarget, setReplyTarget] = useState<Message | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   async function handleRenameDm() {
     if (!activeDm) return;
@@ -1699,6 +1703,7 @@ export function ChatApp({
                               onContextMenu={handleContextMenu(() => [
                                 { kind: "item" as const, label: "Copy Text", icon: Copy, onSelect: () => void handleCopyMessage(m.id, m.content) },
                                 { kind: "item" as const, label: "Copy Message ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(m.id) },
+                                { kind: "item" as const, label: "Reply", icon: Reply, onSelect: () => setReplyTarget(m) },
                                 ...(mine
                                   ? [
                                       { kind: "separator" as const },
@@ -1718,6 +1723,12 @@ export function ChatApp({
                                 </span>
                               )}
                               <div className="relative">
+                                {m.reply_to && (
+                                  <div className={`mb-0.5 flex items-center gap-1 text-[10px] text-[#8B93A1] ${mine ? "justify-end" : ""}`}>
+                                    <Reply className="size-2.5 -scale-x-100" />
+                                    <span className="max-w-40 truncate">{m.reply_to.content}</span>
+                                  </div>
+                                )}
                                 {editingMessageId === m.id ? (
                                   <div className={`w-64 rounded-2xl border border-[#F0A868]/40 bg-[#12151B] p-2 sm:w-80`}>
                                     <textarea
@@ -1866,6 +1877,19 @@ export function ChatApp({
             </div>
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
+              {replyTarget && (
+                <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
+                  <Reply className="size-3.5 shrink-0 -scale-x-100 text-[#8B93A1]" />
+                  <span className="min-w-0 flex-1 truncate">Replying to: {replyTarget.content}</span>
+                  <button
+                    type="button"
+                    onClick={() => setReplyTarget(null)}
+                    className="shrink-0 text-[#8B93A1] transition-colors hover:text-[#E8EAED]"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              )}
               {pendingFile && (
                 <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
                   <Paperclip className="size-3.5 shrink-0 text-[#8B93A1]" />

@@ -31,6 +31,7 @@ import {
   Trash2,
   X,
   Pencil,
+  Reply,
   ArrowUp,
   ArrowDown,
   Paperclip,
@@ -452,6 +453,9 @@ export function GuildView({
   const [editSaving, setEditSaving] = useState(false);
   const [pendingDeleteMessage, setPendingDeleteMessage] = useState<{ channelId: string; id: string } | null>(null);
   const [deletingMessage, setDeletingMessage] = useState(false);
+  // Reply-to state — set when the user picks "Reply" on a message; shown
+  // as a dismissible quote strip above the composer, cleared on send.
+  const [replyTarget, setReplyTarget] = useState<GuildMessage | null>(null);
 
   // channel_id -> unread count, from GET /guilds/:id/unread. Only entries
   // with unread_count > 0 are returned by the backend, so any channel not
@@ -902,10 +906,12 @@ export function GuildView({
     const content = composer.trim();
     const file = pendingFile;
     const channelId = activeChannel.id;
+    const replyToId = replyTarget?.id;
     setComposer("");
     setPendingFile(null);
+    setReplyTarget(null);
     try {
-      await sendGuildMessage(token, guildId, channelId, content, file ?? undefined);
+      await sendGuildMessage(token, guildId, channelId, content, file ?? undefined, replyToId);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Failed to send message");
       setComposer(content);
@@ -1458,6 +1464,7 @@ export function GuildView({
                                   : { kind: "item" as const, label: "Pin Message", icon: Pin, onSelect: () => void handlePinMessage(activeChannel.id, m.id) },
                               ]
                             : []),
+                          { kind: "item" as const, label: "Reply", icon: Reply, onSelect: () => setReplyTarget(m) },
                           ...(mine || canDelete
                             ? [
                                 { kind: "separator" as const },
@@ -1471,6 +1478,13 @@ export function GuildView({
                       >
                         <ClickableAvatar userId={m.sender_id} label={nameFor(m.sender_id)} />
                         <div className="min-w-0 flex-1">
+                          {m.reply_to && (
+                            <div className="mb-0.5 flex items-center gap-1.5 text-xs text-[#8B93A1]">
+                              <Reply className="size-3 -scale-x-100" />
+                              <span className="font-medium text-[#B8BFCC]">{nameFor(m.reply_to.sender_id)}</span>
+                              <span className="truncate">{m.reply_to.content}</span>
+                            </div>
+                          )}
                           <div className="flex items-baseline gap-2">
                             <span
                               className="text-sm font-semibold text-[#E8EAED]"
@@ -1579,6 +1593,20 @@ export function GuildView({
             </div>
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
+              {replyTarget && (
+                <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
+                  <Reply className="size-3.5 shrink-0 -scale-x-100 text-[#8B93A1]" />
+                  <span className="shrink-0 text-[#8B93A1]">Replying to</span>
+                  <span className="min-w-0 flex-1 truncate font-medium text-[#E8EAED]">{nameFor(replyTarget.sender_id)}</span>
+                  <button
+                    type="button"
+                    onClick={() => setReplyTarget(null)}
+                    className="shrink-0 text-[#8B93A1] transition-colors hover:text-[#E8EAED]"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              )}
               {pendingFile && (
                 <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
                   <Paperclip className="size-3.5 shrink-0 text-[#8B93A1]" />

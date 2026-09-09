@@ -512,8 +512,19 @@ pub struct MessageView {
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub reply_to_message_id: Option<Uuid>,
+    #[sqlx(skip)]
+    pub reply_to: Option<ReplyPreview>,
     #[sqlx(skip)]
     pub attachment: Option<AttachmentMeta>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ReplyPreview {
+    pub id: Uuid,
+    pub sender_id: Uuid,
+    pub content: String,
 }
 
 #[derive(Serialize)]
@@ -533,6 +544,8 @@ struct MessageRow {
     content: String,
     created_at: DateTime<Utc>,
     edited_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    reply_to_message_id: Option<Uuid>,
     attachment_mime: Option<String>,
     attachment_filename: Option<String>,
     attachment_size: Option<i32>,
@@ -551,10 +564,33 @@ impl From<MessageRow> for MessageView {
             content: r.content,
             created_at: r.created_at,
             edited_at: r.edited_at,
+            reply_to_message_id: r.reply_to_message_id,
+            reply_to: None,
             attachment,
         }
     }
 }
+
+/// Best-effort fetch of a short preview (sender + truncated content) for
+/// whatever message `reply_to_message_id` points at, so the frontend can
+/// render a quoted-reply strip without a second round trip per message.
+/// Returns None silently if the original was deleted or the id is unset —
+/// never blocks the actual message send/list on this.
+async fn fetch_reply_preview(state: &AppState, reply_to_message_id: Option<Uuid>) -> Option<ReplyPreview> {
+    let id = reply_to_message_id?;
+    let row: Option<(Uuid, String)> = sqlx::query_as("SELECT sender_id, content FROM messages WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()?;
+    let (sender_id, content) = row?;
+    Some(ReplyPreview {
+        id,
+        sender_id,
+        content: content.chars().take(200).collect(),
+    })
+}
+
 
 async fn assert_participant(state: &AppState, dm_id: Uuid, user_id: Uuid) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let row: Option<(Uuid,)> = sqlx::query_as("SELECT dm_id FROM dm_participants WHERE dm_id = $1 AND user_id = $2")
@@ -584,7 +620,7 @@ pub async fn list_messages(
     let rows: Vec<MessageRow> = sqlx::query_as(
         r#"
         SELECT * FROM (
-            SELECT id, dm_id, sender_id, content, created_at, edited_at,
+            SELECT id, dm_id, sender_id, content, created_at, edited_at, reply_to_message_id,
                    attachment_mime, attachment_filename, attachment_size
             FROM messages WHERE dm_id = $1
             ORDER BY created_at DESC LIMIT 50
@@ -596,7 +632,14 @@ pub async fn list_messages(
     .await
     .map_err(internal_err)?;
 
-    Ok(Json(rows.into_iter().map(MessageView::from).collect()))
+    let mut views: Vec<MessageView> = rows.into_iter().map(MessageView::from).collect();
+    for v in &mut views {
+        if v.reply_to_message_id.is_some() {
+            v.reply_to = fetch_reply_preview(&state, v.reply_to_message_id).await;
+        }
+    }
+
+    Ok(Json(views))
 }
 
 #[derive(Deserialize)]
@@ -631,10 +674,10 @@ pub async fn edit_message(
         return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "message too long (max 4000 characters)" }))));
     }
 
-    let row: Option<MessageView> = sqlx::query_as(
+    let row: Option<MessageRow> = sqlx::query_as(
         "UPDATE messages SET content = $3, edited_at = now()
          WHERE id = $1 AND dm_id = $2 AND sender_id = $4
-         RETURNING id, dm_id, sender_id, content, created_at, edited_at",
+         RETURNING id, dm_id, sender_id, content, created_at, edited_at, reply_to_message_id, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(message_id)
     .bind(dm_id)
@@ -644,9 +687,11 @@ pub async fn edit_message(
     .await
     .map_err(internal_err)?;
 
-    let Some(msg) = row else {
+    let Some(row) = row else {
         return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "not found, or you're not the sender" }))));
     };
+    let mut msg = MessageView::from(row);
+    msg.reply_to = fetch_reply_preview(&state, msg.reply_to_message_id).await;
 
     let participants: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
         .bind(dm_id)
@@ -810,6 +855,7 @@ pub async fn send_message(
 
     let mut content = String::new();
     let mut attachment: Option<(Vec<u8>, String, String)> = None; // (bytes, mime, filename)
+    let mut reply_to_message_id: Option<Uuid> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("malformed upload: {e}") })))
@@ -819,6 +865,10 @@ pub async fn send_message(
                 content = field.text().await.map_err(|e| {
                     (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("bad content field: {e}") })))
                 })?;
+            }
+            Some("reply_to_message_id") => {
+                let raw = field.text().await.unwrap_or_default();
+                reply_to_message_id = Uuid::parse_str(raw.trim()).ok();
             }
             Some("file") => {
                 let filename = field.file_name().unwrap_or("attachment").to_string();
@@ -862,13 +912,14 @@ pub async fn send_message(
         };
 
     let row: MessageRow = sqlx::query_as(
-        "INSERT INTO messages (dm_id, sender_id, content, attachment_data, attachment_mime, attachment_filename, attachment_size)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, dm_id, sender_id, content, created_at, edited_at, attachment_mime, attachment_filename, attachment_size",
+        "INSERT INTO messages (dm_id, sender_id, content, reply_to_message_id, attachment_data, attachment_mime, attachment_filename, attachment_size)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, dm_id, sender_id, content, created_at, edited_at, reply_to_message_id, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(dm_id)
     .bind(me)
     .bind(&content)
+    .bind(reply_to_message_id)
     .bind(&att_bytes)
     .bind(&att_mime)
     .bind(&att_filename)
@@ -876,7 +927,8 @@ pub async fn send_message(
     .fetch_one(&state.db)
     .await
     .map_err(internal_err)?;
-    let msg = MessageView::from(row);
+    let mut msg = MessageView::from(row);
+    msg.reply_to = fetch_reply_preview(&state, msg.reply_to_message_id).await;
 
     // The sender has, by definition, "read" their own message — advance
     // their own read pointer too so their unread_count for this DM doesn't

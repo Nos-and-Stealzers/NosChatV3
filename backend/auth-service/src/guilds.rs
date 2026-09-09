@@ -332,8 +332,19 @@ pub struct GuildMessageView {
     pub pinned_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub is_system: bool,
+    #[serde(default)]
+    pub reply_to_message_id: Option<Uuid>,
+    #[sqlx(skip)]
+    pub reply_to: Option<GuildReplyPreview>,
     #[sqlx(skip)]
     pub attachment: Option<GuildAttachmentMeta>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct GuildReplyPreview {
+    pub id: Uuid,
+    pub sender_id: Uuid,
+    pub content: String,
 }
 
 #[derive(Serialize)]
@@ -354,6 +365,8 @@ struct GuildMessageRow {
     pinned_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
     is_system: bool,
+    #[sqlx(default)]
+    reply_to_message_id: Option<Uuid>,
     attachment_mime: Option<String>,
     attachment_filename: Option<String>,
     attachment_size: Option<i32>,
@@ -374,9 +387,29 @@ impl From<GuildMessageRow> for GuildMessageView {
             edited_at: r.edited_at,
             pinned_at: r.pinned_at,
             is_system: r.is_system,
+            reply_to_message_id: r.reply_to_message_id,
+            reply_to: None,
             attachment,
         }
     }
+}
+
+/// Best-effort fetch of a short preview for a guild message reply target
+/// (mirrors dms::fetch_reply_preview) — never blocks send/list on a
+/// deleted or missing original.
+async fn fetch_guild_reply_preview(state: &AppState, reply_to_message_id: Option<Uuid>) -> Option<GuildReplyPreview> {
+    let id = reply_to_message_id?;
+    let row: Option<(Uuid, String)> = sqlx::query_as("SELECT sender_id, content FROM guild_messages WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()?;
+    let (sender_id, content) = row?;
+    Some(GuildReplyPreview {
+        id,
+        sender_id,
+        content: content.chars().take(200).collect(),
+    })
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -1708,7 +1741,7 @@ pub async fn list_channel_messages(
     let rows: Vec<GuildMessageRow> = sqlx::query_as(
         r#"
         SELECT * FROM (
-            SELECT id, channel_id, sender_id, content, created_at, edited_at, pinned_at,
+            SELECT id, channel_id, sender_id, content, created_at, edited_at, pinned_at, is_system, reply_to_message_id,
                    attachment_mime, attachment_filename, attachment_size
             FROM guild_messages WHERE channel_id = $1
             ORDER BY created_at DESC LIMIT 50
@@ -1720,7 +1753,14 @@ pub async fn list_channel_messages(
     .await
     .map_err(internal_err)?;
 
-    Ok(Json(rows.into_iter().map(GuildMessageView::from).collect()))
+    let mut views: Vec<GuildMessageView> = rows.into_iter().map(GuildMessageView::from).collect();
+    for v in &mut views {
+        if v.reply_to_message_id.is_some() {
+            v.reply_to = fetch_guild_reply_preview(&state, v.reply_to_message_id).await;
+        }
+    }
+
+    Ok(Json(views))
 }
 
 #[derive(Deserialize)]
@@ -1858,11 +1898,16 @@ pub async fn send_channel_message(
 
     let mut content = String::new();
     let mut attachment: Option<(Vec<u8>, String, String)> = None;
+    let mut reply_to_message_id: Option<Uuid> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| bad_request(&format!("malformed upload: {e}")))? {
         match field.name() {
             Some("content") => {
                 content = field.text().await.map_err(|e| bad_request(&format!("bad content field: {e}")))?;
+            }
+            Some("reply_to_message_id") => {
+                let raw = field.text().await.unwrap_or_default();
+                reply_to_message_id = Uuid::parse_str(raw.trim()).ok();
             }
             Some("file") => {
                 let filename = field.file_name().unwrap_or("attachment").to_string();
@@ -1898,13 +1943,14 @@ pub async fn send_channel_message(
         };
 
     let row: GuildMessageRow = sqlx::query_as(
-        "INSERT INTO guild_messages (channel_id, sender_id, content, attachment_data, attachment_mime, attachment_filename, attachment_size)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at, attachment_mime, attachment_filename, attachment_size",
+        "INSERT INTO guild_messages (channel_id, sender_id, content, reply_to_message_id, attachment_data, attachment_mime, attachment_filename, attachment_size)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at, is_system, reply_to_message_id, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(channel_id)
     .bind(me)
     .bind(&content)
+    .bind(reply_to_message_id)
     .bind(&att_bytes)
     .bind(&att_mime)
     .bind(&att_filename)
@@ -1912,7 +1958,8 @@ pub async fn send_channel_message(
     .fetch_one(&state.db)
     .await
     .map_err(internal_err)?;
-    let msg = GuildMessageView::from(row);
+    let mut msg = GuildMessageView::from(row);
+    msg.reply_to = fetch_guild_reply_preview(&state, msg.reply_to_message_id).await;
 
     let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
         .bind(guild_id)
@@ -2087,10 +2134,10 @@ pub async fn edit_channel_message(
         return Err(bad_request("message too long (max 4000 characters)"));
     }
 
-    let row: Option<GuildMessageView> = sqlx::query_as(
+    let row: Option<GuildMessageRow> = sqlx::query_as(
         "UPDATE guild_messages SET content = $3, edited_at = now()
          WHERE id = $1 AND channel_id = $2 AND sender_id = $4
-         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at",
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at, is_system, reply_to_message_id, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(message_id)
     .bind(channel_id)
@@ -2100,9 +2147,11 @@ pub async fn edit_channel_message(
     .await
     .map_err(internal_err)?;
 
-    let Some(msg) = row else {
+    let Some(row) = row else {
         return Err(forbidden("not found, or you're not the sender"));
     };
+    let mut msg = GuildMessageView::from(row);
+    msg.reply_to = fetch_guild_reply_preview(&state, msg.reply_to_message_id).await;
 
     let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
         .bind(guild_id)
@@ -2130,10 +2179,10 @@ pub async fn pin_message(
     require_permission(&state, guild_id, me, PERM_MANAGE_MESSAGES).await?;
     assert_text_channel(&state, guild_id, channel_id).await?;
 
-    let row: Option<GuildMessageView> = sqlx::query_as(
+    let row: Option<GuildMessageRow> = sqlx::query_as(
         "UPDATE guild_messages SET pinned_at = now(), pinned_by = $3
          WHERE id = $1 AND channel_id = $2
-         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at",
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at, is_system, reply_to_message_id, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(message_id)
     .bind(channel_id)
@@ -2142,9 +2191,11 @@ pub async fn pin_message(
     .await
     .map_err(internal_err)?;
 
-    let Some(msg) = row else {
+    let Some(row) = row else {
         return Err(not_found("message not found"));
     };
+    let mut msg = GuildMessageView::from(row);
+    msg.reply_to = fetch_guild_reply_preview(&state, msg.reply_to_message_id).await;
 
     let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
         .bind(guild_id)
@@ -2170,10 +2221,10 @@ pub async fn unpin_message(
     require_permission(&state, guild_id, me, PERM_MANAGE_MESSAGES).await?;
     assert_text_channel(&state, guild_id, channel_id).await?;
 
-    let row: Option<GuildMessageView> = sqlx::query_as(
+    let row: Option<GuildMessageRow> = sqlx::query_as(
         "UPDATE guild_messages SET pinned_at = NULL, pinned_by = NULL
          WHERE id = $1 AND channel_id = $2
-         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at",
+         RETURNING id, channel_id, sender_id, content, created_at, edited_at, pinned_at, is_system, reply_to_message_id, attachment_mime, attachment_filename, attachment_size",
     )
     .bind(message_id)
     .bind(channel_id)
@@ -2181,9 +2232,11 @@ pub async fn unpin_message(
     .await
     .map_err(internal_err)?;
 
-    let Some(msg) = row else {
+    let Some(row) = row else {
         return Err(not_found("message not found"));
     };
+    let mut msg = GuildMessageView::from(row);
+    msg.reply_to = fetch_guild_reply_preview(&state, msg.reply_to_message_id).await;
 
     let members: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM guild_members WHERE guild_id = $1")
         .bind(guild_id)
