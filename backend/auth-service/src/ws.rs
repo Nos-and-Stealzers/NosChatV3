@@ -183,6 +183,19 @@ enum ClientEvent {
     VoiceOffer { channel_id: Uuid, to: Uuid, sdp: Value },
     VoiceAnswer { channel_id: Uuid, to: Uuid, sdp: Value },
     VoiceIceCandidate { channel_id: Uuid, to: Uuid, candidate: Value },
+
+    // ---- Group-DM voice/video call presence + WebRTC mesh signaling ----
+    // Exact parallel of the guild Voice* variants above, but keyed by
+    // dm_id instead of channel_id and gated by DM-group-membership instead
+    // of guild CONNECT permission. Reuses the SAME `WsHub::voice_channels`
+    // presence map (keyed by a bare Uuid, so a dm_id works exactly like a
+    // channel_id there — see assert_can_connect_dm_voice below).
+    DmVoiceJoin { dm_id: Uuid },
+    DmVoiceLeave { dm_id: Uuid },
+    DmVoiceScreenShareState { dm_id: Uuid, sharing: bool },
+    DmVoiceOffer { dm_id: Uuid, to: Uuid, sdp: Value },
+    DmVoiceAnswer { dm_id: Uuid, to: Uuid, sdp: Value },
+    DmVoiceIceCandidate { dm_id: Uuid, to: Uuid, candidate: Value },
 }
 
 /// Looks up the DM's participants, confirms `user_id` is actually one of
@@ -237,6 +250,31 @@ async fn assert_can_connect_voice(state: &AppState, channel_id: Uuid, user_id: U
             None
         }
     }
+}
+
+/// Confirms `dm_id` is a *group* DM (`is_group = true`) and `user_id` is a
+/// participant of it. Used to gate `DmVoiceJoin` — the group-DM analogue
+/// of `assert_can_connect_voice` above. 1:1 DMs already have their own
+/// call path (`Call*` variants); this is only for group DMs, so a non-group
+/// dm_id is rejected here too, not just a non-participant.
+async fn assert_can_connect_dm_voice(state: &AppState, dm_id: Uuid, user_id: Uuid) -> bool {
+    let row: Option<(bool,)> = match sqlx::query_as(
+        "SELECT c.is_group FROM dm_channels c
+         JOIN dm_participants p ON p.dm_id = c.id AND p.user_id = $1
+         WHERE c.id = $2",
+    )
+    .bind(user_id)
+    .bind(dm_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::warn!("ws: failed to look up dm for voice gate: {e}");
+            return false;
+        }
+    };
+    matches!(row, Some((true,)))
 }
 
 /// No persistence — typing state and call signaling are both deliberately
@@ -423,6 +461,92 @@ async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent
             let payload = json!({
                 "type": "voice_ice_candidate",
                 "channel_id": channel_id,
+                "from": user_id,
+                "candidate": candidate,
+            });
+            state.ws_hub.send_to(to, payload).await;
+        }
+
+        ClientEvent::DmVoiceJoin { dm_id } => {
+            if !assert_can_connect_dm_voice(state, dm_id, user_id).await {
+                tracing::warn!("ws: user {user_id} denied dm_voice_join on dm {dm_id}");
+                return;
+            }
+            let existing = state.ws_hub.voice_join(dm_id, user_id).await;
+
+            // Tell the joiner who's already there so they can open mesh
+            // connections to each of them (same snapshot pattern as guild
+            // voice channels).
+            let snapshot = json!({
+                "type": "dm_voice_channel_state",
+                "dm_id": dm_id,
+                "user_ids": existing,
+            });
+            state.ws_hub.send_to(user_id, snapshot).await;
+
+            // Tell everyone already there that a new peer joined.
+            let joined_payload = json!({
+                "type": "dm_voice_user_joined",
+                "dm_id": dm_id,
+                "user_id": user_id,
+            });
+            state.ws_hub.send_to_many(&existing, joined_payload).await;
+        }
+        ClientEvent::DmVoiceLeave { dm_id } => {
+            state.ws_hub.voice_leave(dm_id, user_id).await;
+            let remaining = state.ws_hub.voice_members(dm_id).await;
+            let payload = json!({
+                "type": "dm_voice_user_left",
+                "dm_id": dm_id,
+                "user_id": user_id,
+            });
+            state.ws_hub.send_to_many(&remaining, payload).await;
+        }
+        ClientEvent::DmVoiceScreenShareState { dm_id, sharing } => {
+            if !state.ws_hub.is_in_voice_channel(dm_id, user_id).await {
+                return;
+            }
+            let members = state.ws_hub.voice_members(dm_id).await;
+            let others: Vec<Uuid> = members.into_iter().filter(|id| *id != user_id).collect();
+            let payload = json!({
+                "type": "dm_voice_screen_share_state",
+                "dm_id": dm_id,
+                "user_id": user_id,
+                "sharing": sharing,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::DmVoiceOffer { dm_id, to, sdp } => {
+            if !state.ws_hub.is_in_voice_channel(dm_id, user_id).await {
+                return;
+            }
+            let payload = json!({
+                "type": "dm_voice_offer",
+                "dm_id": dm_id,
+                "from": user_id,
+                "sdp": sdp,
+            });
+            state.ws_hub.send_to(to, payload).await;
+        }
+        ClientEvent::DmVoiceAnswer { dm_id, to, sdp } => {
+            if !state.ws_hub.is_in_voice_channel(dm_id, user_id).await {
+                return;
+            }
+            let payload = json!({
+                "type": "dm_voice_answer",
+                "dm_id": dm_id,
+                "from": user_id,
+                "sdp": sdp,
+            });
+            state.ws_hub.send_to(to, payload).await;
+        }
+        ClientEvent::DmVoiceIceCandidate { dm_id, to, candidate } => {
+            if !state.ws_hub.is_in_voice_channel(dm_id, user_id).await {
+                return;
+            }
+            let payload = json!({
+                "type": "dm_voice_ice_candidate",
+                "dm_id": dm_id,
                 "from": user_id,
                 "candidate": candidate,
             });

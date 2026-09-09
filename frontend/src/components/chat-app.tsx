@@ -67,6 +67,8 @@ import {
   unblockUser,
   listBlockedUsers,
   type BlockedUser,
+  markGuildChannelRead,
+  getGuildUnread,
   type Friendship,
   type DmSummary,
   type Message,
@@ -426,6 +428,26 @@ export function ChatApp({
       return { ...prev, [guildId]: total };
     });
   }, []);
+
+  // Real: fetches every channel with unread messages in this guild and
+  // marks each one read server-side (the old version only zeroed local
+  // state, so the badge came right back after any refresh/resubscribe).
+  async function handleMarkGuildRead(guildId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      const entries = await getGuildUnread(token, guildId);
+      await Promise.all(
+        entries
+          .filter((e) => e.unread_count > 0)
+          .map((e) => markGuildChannelRead(token, guildId, e.channel_id).catch(() => {})),
+      );
+      setUnreadByGuild((prev) => ({ ...prev, [guildId]: 0 }));
+    } catch {
+      // Non-fatal — worst case the badge doesn't clear this click.
+    }
+  }
+
   const [guildSettingsOpen, setGuildSettingsOpen] = useState(false);
   const [guildSettingsInitialTab, setGuildSettingsInitialTab] = useState<
     "general" | "roles" | "members" | "invites"
@@ -1168,7 +1190,7 @@ export function ChatApp({
             { kind: "item", label: "Server Settings", icon: Settings, onSelect: () => { openGuildView(g.id); setGuildSettingsOpen(true); } },
             { kind: "separator" },
             { kind: "item", label: "Copy Server ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(g.id) },
-            { kind: "item", label: "Mark as Read", onSelect: () => setUnreadByGuild((prev) => ({ ...prev, [g.id]: 0 })) },
+            { kind: "item", label: "Mark as Read", onSelect: () => void handleMarkGuildRead(g.id) },
           ]}
         />
 
