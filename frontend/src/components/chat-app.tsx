@@ -67,6 +67,7 @@ import {
   blockUser,
   unblockUser,
   listBlockedUsers,
+  type DmParticipant,
   type BlockedUser,
   markGuildChannelRead,
   getGuildUnread,
@@ -468,6 +469,8 @@ export function ChatApp({
   const lastTypingSentRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionActiveIdx, setMentionActiveIdx] = useState(0);
   const settingsRef = useRef(settings);
   // Which DM row(s) should briefly pulse/scale their unread badge — set
   // when a new incoming message bumps a DM's unread count, cleared shortly
@@ -1062,6 +1065,29 @@ export function ChatApp({
   // Enter inserts a newline and Shift+Enter sends instead (the inverted
   // convention some users prefer for longer messages).
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionQuery !== null && activeDm?.is_group) {
+      const candidates = dmMentionCandidates();
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionActiveIdx((i) => (i + 1) % Math.max(candidates.length, 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionActiveIdx((i) => (i - 1 + candidates.length) % Math.max(candidates.length, 1));
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && candidates.length > 0) {
+        e.preventDefault();
+        insertDmMention(candidates[mentionActiveIdx]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
+    }
     const sendOnEnter = settingsRef.current.sendOnEnter;
     const wantsSend = sendOnEnter ? e.key === "Enter" && !e.shiftKey : e.key === "Enter" && e.shiftKey;
     if (wantsSend) {
@@ -1070,7 +1096,7 @@ export function ChatApp({
     }
   }
 
-  function handleComposerChange(value: string) {
+  function handleComposerChange(value: string, cursorPos?: number) {
     // Real: paste-as-plain-text strips any hidden formatting/whitespace
     // weirdness pasted clipboard content might carry in a plain textarea —
     // mostly a no-op for a <textarea> but genuinely applied here rather
@@ -1083,6 +1109,50 @@ export function ChatApp({
         sendTyping(view.dmId);
       }
     }
+    // @mention autocomplete — only meaningful in group DMs (multiple
+    // possible targets); 1:1 DMs have exactly one other participant so
+    // there's nothing to disambiguate.
+    if (activeDm?.is_group) {
+      const cursor = cursorPos ?? value.length;
+      const atMatch = /@([a-zA-Z0-9_]{0,32})$/.exec(value.slice(0, cursor));
+      if (atMatch) {
+        setMentionQuery(atMatch[1]);
+        setMentionActiveIdx(0);
+      } else {
+        setMentionQuery(null);
+      }
+    }
+  }
+
+  function dmMentionCandidates(): DmParticipant[] {
+    if (!activeDm?.participants) return [];
+    const q = (mentionQuery ?? "").toLowerCase();
+    return activeDm.participants
+      .filter((p) => p.user_id !== myId)
+      .filter((p) => (p.username ?? p.email).toLowerCase().startsWith(q))
+      .slice(0, 6);
+  }
+
+  function insertDmMention(p: DmParticipant) {
+    const el = composerRef.current;
+    const cursor = el?.selectionStart ?? composer.length;
+    const upToCursor = composer.slice(0, cursor);
+    const atMatch = /@([a-zA-Z0-9_]{0,32})$/.exec(upToCursor);
+    if (!atMatch) {
+      setMentionQuery(null);
+      return;
+    }
+    const start = atMatch.index;
+    const before = composer.slice(0, start);
+    const after = composer.slice(cursor);
+    const token = `<@${p.user_id}> `;
+    setComposer(before + token + after);
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      el?.focus();
+      const pos = before.length + token.length;
+      el?.setSelectionRange(pos, pos);
+    });
   }
 
   const activeDm =
@@ -1933,7 +2003,14 @@ export function ChatApp({
                                         : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
                                     }`}
                                   >
-                                    {renderMarkdown(m.content, `dm-${m.id}`)}
+                                    {renderMarkdown(m.content, `dm-${m.id}`, {
+                                      resolveMention: (uid) => {
+                                        if (uid === myId) return "You";
+                                        const p = activeDm?.participants?.find((pp) => pp.user_id === uid);
+                                        return p ? (p.username ?? p.email) : null;
+                                      },
+                                      currentUserId: myId,
+                                    })}
                                     {m.edited_at && (
                                       <span className={`ml-1.5 text-[10px] italic ${mine ? "text-[#12151A]/60" : "text-[#8B93A1]"}`}>
                                         (edited)
@@ -2036,6 +2113,26 @@ export function ChatApp({
             </div>
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
+              {mentionQuery !== null && activeDm?.is_group && dmMentionCandidates().length > 0 && (
+                <div className="animate-rise-in mb-1.5 max-h-48 overflow-y-auto rounded-lg border border-[#2A2F3A] bg-[#161A20] p-1 shadow-xl">
+                  {dmMentionCandidates().map((p, i) => (
+                    <button
+                      key={p.user_id}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        insertDmMention(p);
+                      }}
+                      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${
+                        i === mentionActiveIdx ? "bg-[#2A2F3A] text-[#E8EAED]" : "text-[#C7CCD6] hover:bg-[#1E232C]"
+                      }`}
+                    >
+                      <Avatar seed={p.user_id} label={p.username ?? p.email} size="sm" />
+                      <span className="truncate">{p.username ?? p.email}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               {replyTarget && (
                 <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
                   <Reply className="size-3.5 shrink-0 -scale-x-100 text-[#8B93A1]" />
@@ -2126,7 +2223,7 @@ export function ChatApp({
                     ref={composerRef}
                     rows={1}
                     value={composer}
-                    onChange={(e) => handleComposerChange(e.target.value)}
+                    onChange={(e) => handleComposerChange(e.target.value, e.target.selectionStart ?? undefined)}
                     onKeyDown={handleComposerKeyDown}
                     spellCheck={settings.spellcheckEnabled}
                     placeholder={
