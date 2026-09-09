@@ -189,6 +189,9 @@ async fn main() -> anyhow::Result<()> {
             "/guilds/{id}/icon",
             get(guilds::get_guild_icon).post(guilds::upload_guild_icon).delete(guilds::delete_guild_icon),
         )
+        .route("/guilds/{id}/emoji", get(guilds::list_emoji).post(guilds::upload_emoji))
+        .route("/guilds/{id}/emoji/{emoji_id}", axum::routing::delete(guilds::delete_emoji))
+        .route("/guilds/{id}/emoji/{emoji_id}/image", get(guilds::get_emoji_image))
         .route("/guilds/{id}/leave", post(guilds::leave_guild))
         .route("/guilds/{id}/members", get(guilds::list_members))
         .route("/guilds/{id}/members/{user_id}", axum::routing::delete(guilds::kick_member))

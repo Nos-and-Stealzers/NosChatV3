@@ -16,6 +16,7 @@ import {
   Check,
   Ban as BanIcon,
   Crown,
+  Smile,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ClickableAvatar } from "@/components/profile-card";
@@ -33,6 +34,11 @@ import {
   uploadGuildIcon,
   deleteGuildIcon,
   guildIconUrl,
+  listGuildEmoji,
+  uploadGuildEmoji,
+  deleteGuildEmoji,
+  guildEmojiUrl,
+  type GuildEmoji,
   listRoles,
   createRole,
   updateRole,
@@ -51,7 +57,7 @@ import {
   type Invite,
 } from "@/lib/backend-api";
 
-type Tab = "general" | "roles" | "members" | "bans" | "invites" | "audit-log";
+type Tab = "general" | "roles" | "members" | "bans" | "invites" | "audit-log" | "emoji";
 
 const ICON_COLORS = [
   "#F0A868", "#5FD9C4", "#8FA6F0", "#E88FD0", "#F0C868", "#7ED0E8", "#EB5757", "#4ADE80",
@@ -126,6 +132,9 @@ export function GuildSettingsModal({
   const [verificationLevelDraft, setVerificationLevelDraft] = useState(0);
   const [descriptionDraft, setDescriptionDraft] = useState("");
   const [systemChannelDraft, setSystemChannelDraft] = useState<string>("");
+  const [emoji, setEmoji] = useState<GuildEmoji[]>([]);
+  const [newEmojiName, setNewEmojiName] = useState("");
+  const [uploadingEmoji, setUploadingEmoji] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -160,6 +169,7 @@ export function GuildSettingsModal({
       if (hasPermission(d.my_permissions, PERMISSIONS.MANAGE_GUILD)) {
         setInvites(await listInvites(token, guildId));
       }
+      setEmoji(await listGuildEmoji(token, guildId));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load server settings");
     }
@@ -189,6 +199,7 @@ export function GuildSettingsModal({
     { id: "bans" as Tab, label: "Bans", visible: canBan },
     { id: "invites" as Tab, label: "Invites", visible: canManageGuild },
     { id: "audit-log" as Tab, label: "Audit Log", visible: canAdmin },
+    { id: "emoji" as Tab, label: "Emoji", visible: canManageGuild },
   ].filter((t) => t.visible);
 
   async function handleSaveGeneral() {
@@ -209,6 +220,37 @@ export function GuildSettingsModal({
       setError(e instanceof Error ? e.message : "Failed to update server");
     } finally {
       setSavingGeneral(false);
+    }
+  }
+
+  async function handleUploadEmoji(file: File) {
+    if (!newEmojiName.trim()) {
+      setError("Enter an emoji name first");
+      return;
+    }
+    setUploadingEmoji(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await uploadGuildEmoji(token, guildId, newEmojiName.trim(), file);
+      setNewEmojiName("");
+      const token2 = await getToken();
+      if (token2) setEmoji(await listGuildEmoji(token2, guildId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to upload emoji");
+    } finally {
+      setUploadingEmoji(false);
+    }
+  }
+
+  async function handleDeleteEmoji(emojiId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await deleteGuildEmoji(token, guildId, emojiId);
+      setEmoji((prev) => prev.filter((e) => e.id !== emojiId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete emoji");
     }
   }
 
@@ -804,6 +846,68 @@ export function GuildSettingsModal({
                     </p>
                   </div>
                 ))}
+              </div>
+            )}
+            {tab === "emoji" && canManageGuild && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-end gap-2">
+                  <div>
+                    <label className="mb-1 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                      Emoji Name
+                    </label>
+                    <Input
+                      value={newEmojiName}
+                      onChange={(e) => setNewEmojiName(e.target.value.replace(/[^a-zA-Z0-9_]/g, "").slice(0, 32))}
+                      placeholder="my_emoji"
+                      className="h-9 w-40 rounded-md border-[#2A2F3A] bg-[#0F1217]/80 text-sm text-[#E8EAED]"
+                    />
+                  </div>
+                  <label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      disabled={uploadingEmoji}
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void handleUploadEmoji(file);
+                        e.target.value = "";
+                      }}
+                    />
+                    <span className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg bg-[#F0A868] px-3 text-sm font-medium text-[#12151A] transition-opacity hover:opacity-90 aria-disabled:opacity-50">
+                      <Plus className="size-3.5" /> {uploadingEmoji ? "Uploading…" : "Upload"}
+                    </span>
+                  </label>
+                  <p className="text-xs text-[#8B93A1]">PNG/GIF/JPEG, max 32KB, up to 50 per server.</p>
+                </div>
+                <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+                  {emoji.map((em) => (
+                    <div
+                      key={em.id}
+                      className="group/emoji relative flex flex-col items-center gap-1 rounded-xl border border-[#1D2129] bg-[#12151B] p-2"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element -- backend-hosted small inline blob */}
+                      <img
+                        src={guildEmojiUrl(guildId, em.id)}
+                        alt={em.name}
+                        className="size-8 object-contain"
+                      />
+                      <p className="w-full truncate text-center text-[10px] text-[#8B93A1]">:{em.name}:</p>
+                      <button
+                        onClick={() => void handleDeleteEmoji(em.id)}
+                        className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-[#EB5757] text-white opacity-0 transition-opacity group-hover/emoji:opacity-100"
+                        title="Delete emoji"
+                      >
+                        <Trash2 className="size-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {emoji.length === 0 && (
+                    <p className="col-span-full text-sm text-[#8B93A1]">
+                      <Smile className="mb-1 size-4" /> No custom emoji yet.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             {tab === "invites" && canManageGuild && (

@@ -977,6 +977,160 @@ pub async fn get_guild_icon(
     Ok(([(header::CONTENT_TYPE, mime)], bytes))
 }
 
+const MAX_EMOJI_BYTES: usize = 32 * 1024; // 32KB — small on purpose, these render inline in text
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct EmojiView {
+    pub id: Uuid,
+    pub name: String,
+    pub created_by: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /guilds/:id/emoji` — every custom emoji this guild has, for the
+/// emoji picker and message-render code to resolve `:name:` -> image.
+pub async fn list_emoji(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+) -> Result<Json<Vec<EmojiView>>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_member(&state, guild_id, me).await?;
+
+    let rows: Vec<EmojiView> = sqlx::query_as(
+        "SELECT id, name, created_by, created_at FROM guild_emoji
+         WHERE guild_id = $1 ORDER BY name",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows))
+}
+
+/// `POST /guilds/:id/emoji` — multipart upload (fields: `name`, `file`),
+/// requires MANAGE_GUILD (same bar as icon/channel management — creating
+/// server assets is an admin action, not open to every member).
+pub async fn upload_emoji(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(guild_id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<Json<EmojiView>, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    let mut name: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut mime = "image/png".to_string();
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| bad_request(&format!("malformed upload: {e}")))? {
+        match field.name() {
+            Some("name") => {
+                name = Some(field.text().await.map_err(|e| bad_request(&format!("bad name field: {e}")))?);
+            }
+            Some("file") => {
+                if let Some(ct) = field.content_type() {
+                    mime = ct.to_string();
+                }
+                let data = field.bytes().await.map_err(|e| bad_request(&format!("failed reading upload: {e}")))?;
+                if data.len() > MAX_EMOJI_BYTES {
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(json!({ "error": "emoji image too large — max 32KB" })),
+                    ));
+                }
+                if !mime.starts_with("image/") {
+                    return Err(bad_request("file must be an image"));
+                }
+                bytes = Some(data.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    let Some(name) = name else { return Err(bad_request("missing 'name' field")) };
+    let name = name.trim().to_string();
+    if !(2..=32).contains(&name.len()) || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(bad_request("emoji name must be 2-32 chars, letters/digits/underscore only"));
+    }
+    let Some(bytes) = bytes else { return Err(bad_request("missing 'file' field")) };
+
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM guild_emoji WHERE guild_id = $1")
+        .bind(guild_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if count.0 >= 50 {
+        return Err(bad_request("this server already has the max of 50 custom emoji"));
+    }
+
+    let row: EmojiView = sqlx::query_as(
+        "INSERT INTO guild_emoji (guild_id, name, image, image_mime, created_by)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, name, created_by, created_at",
+    )
+    .bind(guild_id)
+    .bind(&name)
+    .bind(&bytes)
+    .bind(&mime)
+    .bind(me)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("guild_emoji_guild_id_name_key") {
+            bad_request("an emoji with this name already exists in this server")
+        } else {
+            internal_err(e)
+        }
+    })?;
+
+    Ok(Json(row))
+}
+
+/// `DELETE /guilds/:id/emoji/:emoji_id` — requires MANAGE_GUILD.
+pub async fn delete_emoji(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path((guild_id, emoji_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
+
+    sqlx::query("DELETE FROM guild_emoji WHERE id = $1 AND guild_id = $2")
+        .bind(emoji_id)
+        .bind(guild_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /guilds/:id/emoji/:emoji_id/image` — streams the raw emoji image.
+/// Not gated behind auth for the same reason as the guild icon: it needs
+/// to work as a plain `<img src>` in rendered message text.
+pub async fn get_emoji_image(
+    State(state): State<AppState>,
+    Path((guild_id, emoji_id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row: Option<(Vec<u8>, String)> = sqlx::query_as(
+        "SELECT image, image_mime FROM guild_emoji WHERE id = $1 AND guild_id = $2",
+    )
+    .bind(emoji_id)
+    .bind(guild_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    let Some((bytes, mime)) = row else {
+        return Err(not_found("emoji not found"));
+    };
+
+    Ok(([(header::CONTENT_TYPE, mime)], bytes))
+}
+
 /// `DELETE /guilds/:id` — owner only, not just MANAGE_GUILD.
 pub async fn delete_guild(
     State(state): State<AppState>,

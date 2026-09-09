@@ -573,6 +573,48 @@ export function deleteGuildIcon(token: string, guildId: string) {
   return req<void>(`/guilds/${guildId}/icon`, token, { method: "DELETE" });
 }
 
+// ---- Guild custom emoji ----------------------------------------------------
+
+export type GuildEmoji = {
+  id: string;
+  name: string;
+  created_by: string | null;
+  created_at: string;
+};
+
+export function listGuildEmoji(token: string, guildId: string) {
+  return req<GuildEmoji[]>(`/guilds/${guildId}/emoji`, token);
+}
+
+export function guildEmojiUrl(guildId: string, emojiId: string): string {
+  return `${AUTH_SERVICE_URL}/guilds/${guildId}/emoji/${emojiId}/image`;
+}
+
+export async function uploadGuildEmoji(token: string, guildId: string, name: string, file: File) {
+  const form = new FormData();
+  form.append("name", name);
+  form.append("file", file);
+  const res = await fetch(`${AUTH_SERVICE_URL}/guilds/${guildId}/emoji`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    const message =
+      data && typeof data === "object" && "error" in data
+        ? (data as { error: string }).error
+        : `Upload failed with status ${res.status}`;
+    throw new Error(message);
+  }
+  return res.json() as Promise<GuildEmoji>;
+}
+
+export function deleteGuildEmoji(token: string, guildId: string, emojiId: string) {
+  return req<void>(`/guilds/${guildId}/emoji/${emojiId}`, token, { method: "DELETE" });
+}
+
+
 // ---- Guild channels -------------------------------------------------------
 
 export function createGuildChannel(
