@@ -1400,6 +1400,7 @@ export function GuildView({
                           {m.attachment && (
                             <AttachmentPreview
                               attachment={m.attachment}
+                              blurByDefault={settings.sensitiveContentBlur && !!activeChannel.is_nsfw}
                               load={async () => {
                                 const token = await getToken();
                                 if (!token) throw new Error("not signed in");

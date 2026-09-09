@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Paperclip } from "lucide-react";
+import { Paperclip, EyeOff } from "lucide-react";
 
 // Real attachment renderer for DM/guild messages: fetches the attachment's
 // bytes (authenticated — attachments aren't public like guild icons) into a
@@ -11,12 +11,15 @@ import { Paperclip } from "lucide-react";
 export function AttachmentPreview({
   attachment,
   load,
+  blurByDefault = false,
 }: {
   attachment: { filename: string; mime: string; size: number };
   load: () => Promise<string>;
+  blurByDefault?: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [revealed, setRevealed] = useState(!blurByDefault);
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | null = null;
@@ -55,21 +58,42 @@ export function AttachmentPreview({
 
   if (isImage) {
     return (
-      <a
-        href={url ?? undefined}
-        target="_blank"
-        rel="noreferrer"
-        className="mt-1.5 block max-w-[320px] overflow-hidden rounded-lg border border-white/[0.06]"
-      >
-        {url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={url} alt={attachment.filename} className="max-h-[280px] w-full object-cover" />
-        ) : (
-          <div className="flex h-32 items-center justify-center bg-black/20 text-xs text-[#8B93A1]">
-            Loading image…
-          </div>
+      <div className="relative mt-1.5 block max-w-[320px] overflow-hidden rounded-lg border border-white/[0.06]">
+        <a
+          href={url ?? undefined}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(e) => {
+            if (!revealed) {
+              e.preventDefault();
+              setRevealed(true);
+            }
+          }}
+        >
+          {url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={url}
+              alt={attachment.filename}
+              className={`max-h-[280px] w-full object-cover ${!revealed ? "blur-2xl" : ""}`}
+            />
+          ) : (
+            <div className="flex h-32 items-center justify-center bg-black/20 text-xs text-[#8B93A1]">
+              Loading image…
+            </div>
+          )}
+        </a>
+        {url && !revealed && (
+          <button
+            type="button"
+            onClick={() => setRevealed(true)}
+            className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-black/40 text-xs font-medium text-white transition-colors hover:bg-black/50"
+          >
+            <EyeOff className="size-5" />
+            Sensitive content — click to view
+          </button>
         )}
-      </a>
+      </div>
     );
   }
 
@@ -85,3 +109,4 @@ export function AttachmentPreview({
     </a>
   );
 }
+

@@ -366,7 +366,7 @@ export const SETTINGS_CATALOG: SettingDef[] = [
   { id: "showLastSeenToFriends", category: "privacy", label: "Show last-seen to friends", description: "Tied to Appear Offline; not backend-enforced yet.", type: "toggle", wire: "stub" },
   { id: "requireFriendRequestApproval", category: "privacy", label: "Require approval for friend requests", description: "This is already the app's real behavior (requests need accept).", type: "toggle", wire: "stub" },
   { id: "autoDeclineUnknownDms", category: "privacy", label: "Auto-decline DMs from non-friends", description: "The app only supports DMs with friends already, so this is a no-op placeholder.", type: "toggle", wire: "stub" },
-  { id: "sensitiveContentBlur", category: "privacy", label: "Blur sensitive media by default", description: "Blurs attachment images/GIFs in NSFW channels until clicked.", type: "toggle", wire: "real" },
+  { id: "sensitiveContentBlur", category: "privacy", label: "Blur sensitive media by default", description: "Blurs image attachments in NSFW channels until you click to reveal.", type: "toggle", wire: "real" },
   { id: "shareTypingAcrossDevices", category: "privacy", label: "Share typing status across my devices", description: "Local preference; single-session app currently.", type: "toggle", wire: "stub" },
   { id: "anonymizeAvatarInPreview", category: "privacy", label: "Anonymize avatar in previews", description: "No external preview surface exists yet.", type: "toggle", wire: "stub" },
   { id: "allowNsfwChannels", category: "privacy", label: "Show age-restricted (NSFW) channels", description: "Off by default. Channels marked NSFW are hidden from your sidebar entirely until you opt in.", type: "toggle", wire: "real" },
