@@ -500,6 +500,21 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           ringLoopRef.current = setInterval(() => {
             void sound.play("ringtone");
           }, 2000);
+          if (
+            settingsRef.current.desktopNotificationsEnabled &&
+            typeof Notification !== "undefined" &&
+            Notification.permission === "granted"
+          ) {
+            const n = new Notification("NosChat", {
+              body: event.video ? "Incoming video call…" : "Incoming voice call…",
+              tag: "noschat-incoming-call",
+              requireInteraction: true,
+            });
+            n.onclick = () => {
+              window.focus();
+              n.close();
+            };
+          }
           break;
         }
 

@@ -723,6 +723,13 @@ export function ChatApp({
       } else if (event.type === "friend_request") {
         void refreshFriends();
         void sound.play("ringtone");
+        if (
+          settingsRef.current.desktopNotificationsEnabled &&
+          typeof Notification !== "undefined" &&
+          Notification.permission === "granted"
+        ) {
+          new Notification("NosChat", { body: "New friend request" });
+        }
       } else if (event.type === "friend_accepted") {
         void refreshFriends();
       } else if (event.type === "message_edited") {
@@ -763,6 +770,22 @@ export function ChatApp({
             ...prev,
             [event.guild_id]: (prev[event.guild_id] ?? 0) + 1,
           }));
+          if (!event.message.is_system) {
+            void sound.play("message");
+            if (
+              settingsRef.current.desktopNotificationsEnabled &&
+              typeof Notification !== "undefined" &&
+              Notification.permission === "granted"
+            ) {
+              const body = settingsRef.current.notificationPreviewText
+                ? event.message.content
+                : "New message";
+              new Notification("NosChat", { body });
+            }
+            if (settingsRef.current.vibrateOnMobile && "vibrate" in navigator) {
+              navigator.vibrate?.(80);
+            }
+          }
         }
       } else if (event.type === "guild_banned") {
         // Server-authoritative removal — force the view back to friends if
