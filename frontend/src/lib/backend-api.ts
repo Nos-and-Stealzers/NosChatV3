@@ -855,6 +855,17 @@ export function adminDeleteUser(token: string, userId: string) {
   return req<void>(`/admin/users/${userId}`, token, { method: "DELETE" });
 }
 
+export function adminBanUser(token: string, userId: string, reason?: string) {
+  return req<void>(`/admin/users/${userId}/ban`, token, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? null }),
+  });
+}
+
+export function adminUnbanUser(token: string, userId: string) {
+  return req<void>(`/admin/users/${userId}/ban`, token, { method: "DELETE" });
+}
+
 export type AdminGuildRow = {
   id: string;
   name: string;

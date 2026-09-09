@@ -199,7 +199,9 @@ html { font-size: calc(16px * var(--app-font-scale)); }
 html[data-reduce-motion="on"] .animate-signal-pulse,
 html[data-reduce-motion="on"] .animate-rise-in,
 html[data-reduce-motion="on"] .animate-typing-dot,
-html[data-reduce-motion="on"] .animate-badge-pop {
+html[data-reduce-motion="on"] .animate-badge-pop,
+html[data-reduce-motion="on"] .animate-view-in,
+html[data-reduce-motion="on"] .animate-list-item-in {
   animation: none !important;
 }
 
@@ -410,6 +412,44 @@ html[data-uppercase-labels="off"] [class*="tracking-"].uppercase {
   transform: translateY(0);
 }
 
+/* View-switch transition: applied (keyed by the active view/channel id so
+   React remounts it on every switch) to the main detail panel whenever the
+   user moves between Friends / a DM / a guild, or between channels inside
+   a guild — a soft fade + rise instead of the panel just snapping to new
+   content. Deliberately fast (180ms) so it reads as "polish", not a
+   loading state the user has to wait through. */
+@keyframes view-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-view-in {
+  animation: view-in 0.18s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Sidebar list-item entrance (guild rail icons, channel rows, DM rows) —
+   a quicker/subtler variant of view-in for smaller elements appearing in
+   a list rather than a whole panel swap. */
+@keyframes list-item-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.animate-list-item-in {
+  animation: list-item-in 0.14s ease-out both;
+}
+
+
 @media (prefers-reduced-motion: reduce) {
   .animate-signal-pulse,
   .animate-rise-in,
@@ -417,7 +457,9 @@ html[data-uppercase-labels="off"] [class*="tracking-"].uppercase {
   .animate-badge-pop,
   .animate-status-pulse,
   .animate-pop-in,
-  .animate-shimmer {
+  .animate-shimmer,
+  .animate-view-in,
+  .animate-list-item-in {
     animation: none;
   }
   .noschat-hover-lift:hover,

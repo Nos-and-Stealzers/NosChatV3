@@ -253,6 +253,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/stats", get(admin::admin_stats))
         .route("/admin/users", get(admin::admin_list_users))
         .route("/admin/users/{id}", axum::routing::delete(admin::admin_delete_user))
+        .route(
+            "/admin/users/{id}/ban",
+            post(admin::admin_ban_user).delete(admin::admin_unban_user),
+        )
         .route("/admin/guilds", get(admin::admin_list_guilds))
         .route("/admin/guilds/{id}", axum::routing::delete(admin::admin_delete_guild))
         .fallback(routes::not_found)

@@ -1299,7 +1299,8 @@ export function ChatApp({
         />
       ) : (
       <div
-        className={`relative min-w-0 flex-1 flex-col bg-[#161A20] md:flex ${mobileShowDetail ? "flex" : "hidden md:flex"}`}
+        key={view.kind === "dm" ? `dm-${view.dmId}` : view.kind}
+        className={`animate-view-in relative min-w-0 flex-1 flex-col bg-[#161A20] md:flex ${mobileShowDetail ? "flex" : "hidden md:flex"}`}
       >
         {loadError && (
           <div className="flex flex-none items-center justify-between gap-2 border-b border-[#EB5757]/20 bg-[#EB5757]/10 px-4 py-2 text-xs text-[#EB5757]">

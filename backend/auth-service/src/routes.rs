@@ -105,6 +105,23 @@ pub async fn get_or_create_local_user(
     state: &AppState,
     claims: &crate::clerk::ClerkClaims,
 ) -> Result<UserPublic, (StatusCode, Json<serde_json::Value>)> {
+    // Platform ban check — runs before anything else so a banned account
+    // is rejected on every authenticated route (this is the single choke
+    // point every protected handler goes through), not just a UI-hidden
+    // affordance. Distinct from a per-guild ban in guild_bans.
+    if let Ok(Some((true,))) = sqlx::query_as::<_, (bool,)>(
+        "SELECT is_banned FROM users WHERE clerk_user_id = $1",
+    )
+    .bind(&claims.sub)
+    .fetch_optional(&state.db)
+    .await
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "this account has been banned" })),
+        ));
+    }
+
     let existing: Option<UserPublic> = sqlx::query_as(
         "SELECT id, clerk_user_id, email, username, is_staff FROM users WHERE clerk_user_id = $1",
     )

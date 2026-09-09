@@ -10,12 +10,16 @@
 // presence-context.tsx. For anyone else it's read-only.
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Loader2, X } from "lucide-react";
+import { Check, Loader2, X, ShieldBan, ShieldOff, Copy } from "lucide-react";
 import { avatarRamp, initialOf } from "@/lib/utils";
 import { usePresence } from "@/lib/presence-context";
 import { AvatarWithStatus } from "@/components/status-dot";
 import { StatusDot } from "@/components/status-dot";
 import type { PresenceMode, PresenceStatus, PublicProfile } from "@/lib/backend-api";
+import { adminBanUser, adminUnbanUser } from "@/lib/backend-api";
+import { useAuth } from "@clerk/nextjs";
+import { useIsStaff } from "@/lib/admin-context";
+import { useContextMenuHandler } from "@/lib/context-menu";
 
 const PRESENCE_OPTIONS: { mode: PresenceMode; label: string; dotStatus: PresenceStatus }[] = [
   { mode: "online", label: "Online", dotStatus: "online" },
@@ -236,6 +240,30 @@ export function ClickableAvatar({
   const { statusOf, ownProfile } = usePresence();
   const [open, setOpen] = useState(false);
   const isSelf = !!ownProfile && userId === ownProfile.id;
+  const isStaff = useIsStaff();
+  const { getToken } = useAuth();
+  const handleContextMenu = useContextMenuHandler();
+  const [banBusy, setBanBusy] = useState(false);
+
+  async function handleAdminBan() {
+    setBanBusy(true);
+    try {
+      const token = await getToken();
+      if (token) await adminBanUser(token, userId);
+    } finally {
+      setBanBusy(false);
+    }
+  }
+
+  async function handleAdminUnban() {
+    setBanBusy(true);
+    try {
+      const token = await getToken();
+      if (token) await adminUnbanUser(token, userId);
+    } finally {
+      setBanBusy(false);
+    }
+  }
 
   const avatarEl = (
     <span
@@ -253,6 +281,30 @@ export function ClickableAvatar({
           e.stopPropagation();
           setOpen((v) => !v);
         }}
+        onContextMenu={
+          isStaff && !isSelf
+            ? handleContextMenu(() => [
+                { kind: "label" as const, label: `Admin — ${label}` },
+                { kind: "item" as const, label: "Copy User ID", icon: Copy, onSelect: () => void navigator.clipboard.writeText(userId) },
+                { kind: "separator" as const },
+                {
+                  kind: "item" as const,
+                  label: banBusy ? "Working…" : "Ban from Platform",
+                  icon: ShieldBan,
+                  danger: true,
+                  disabled: banBusy,
+                  onSelect: () => void handleAdminBan(),
+                },
+                {
+                  kind: "item" as const,
+                  label: banBusy ? "Working…" : "Unban from Platform",
+                  icon: ShieldOff,
+                  disabled: banBusy,
+                  onSelect: () => void handleAdminUnban(),
+                },
+              ])
+            : undefined
+        }
         className="rounded-full transition-transform hover:scale-105"
         title={label}
       >
