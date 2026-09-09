@@ -89,6 +89,7 @@ import {
   type ChannelKind,
   type GuildMember,
 } from "@/lib/backend-api";
+import { renderMarkdown } from "@/lib/render-markdown";
 import { useRealtime } from "@/lib/realtime-context";
 import { useVoice } from "@/lib/voice-context";
 import { Users } from "lucide-react";
@@ -394,9 +395,9 @@ export function GuildView({
   }, [guildEmoji]);
 
   function renderMessageContent(content: string) {
-    if (emojiByName.size === 0 || !content.includes(":")) return content;
+    if (emojiByName.size === 0 || !content.includes(":")) return renderMarkdown(content);
     const parts = content.split(/(:[a-zA-Z0-9_]{2,32}:)/g);
-    if (parts.length === 1) return content;
+    if (parts.length === 1) return renderMarkdown(content);
     return parts.map((part, i) => {
       const match = /^:([a-zA-Z0-9_]{2,32}):$/.exec(part);
       const em = match ? emojiByName.get(match[1]) : undefined;
@@ -411,7 +412,7 @@ export function GuildView({
           />
         );
       }
-      return <span key={i}>{part}</span>;
+      return <span key={i}>{renderMarkdown(part, `md-${i}`)}</span>;
     });
   }
 

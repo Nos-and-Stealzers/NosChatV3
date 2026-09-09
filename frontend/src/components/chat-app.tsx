@@ -78,6 +78,7 @@ import { useRealtime } from "@/lib/realtime-context";
 import { useSoundSettings } from "@/lib/use-sound-settings";
 import { useCall } from "@/lib/call-context";
 import { useDmVoice } from "@/lib/dm-voice-context";
+import { renderMarkdown } from "@/lib/render-markdown";
 import { useSettings } from "@/lib/settings-context";
 import { SettingsPanel } from "@/components/settings-panel";
 import { StaffPanel } from "@/components/staff-panel";
@@ -1895,7 +1896,7 @@ export function ChatApp({
                                         : "border border-white/[0.05] bg-[#1E232C] text-[#E8EAED]"
                                     }`}
                                   >
-                                    {m.content}
+                                    {renderMarkdown(m.content, `dm-${m.id}`)}
                                     {m.edited_at && (
                                       <span className={`ml-1.5 text-[10px] italic ${mine ? "text-[#12151A]/60" : "text-[#8B93A1]"}`}>
                                         (edited)
