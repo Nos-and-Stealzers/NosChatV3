@@ -28,6 +28,7 @@ pub struct AppState {
     pub db: PgPool,
     pub clerk_verifier: ClerkVerifier,
     pub clerk_webhook_secret: Option<String>,
+    pub clerk_secret_key: Option<String>,
     pub ws_hub: WsHub,
 }
 
@@ -72,6 +73,18 @@ async fn main() -> anyhow::Result<()> {
     let clerk_webhook_secret = std::env::var("CLERK_WEBHOOK_SECRET")
         .ok()
         .filter(|s| !s.is_empty() && s != "whsec_changeme");
+
+    // Clerk Backend API secret key (sk_live_/sk_test_) — used as a
+    // fallback to resolve a user's real email/username directly from
+    // Clerk's REST API when the local `users` row still has the
+    // lazy-create placeholder email (i.e. the webhook never delivered a
+    // user.created/updated event for them, most commonly because no
+    // webhook endpoint has been configured for this Clerk instance at
+    // all). Optional: if unset, the placeholder just persists until a
+    // real webhook delivery happens.
+    let clerk_secret_key = std::env::var("CLERK_SECRET_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
     if clerk_webhook_secret.is_none() {
         tracing::warn!(
             "\n\
@@ -147,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         clerk_verifier: ClerkVerifier::new(clerk_jwks_url),
         clerk_webhook_secret,
+        clerk_secret_key,
         ws_hub: WsHub::default(),
     };
 

@@ -25,6 +25,50 @@ pub fn is_dev_staff_email(email: &str) -> bool {
     email.eq_ignore_ascii_case(DEV_STAFF_EMAIL)
 }
 
+/// Resolves a Clerk user's real primary email + username directly from
+/// Clerk's Backend API (`GET /v1/users/:id`) using `CLERK_SECRET_KEY`.
+/// This is the fallback path for when a local `users` row still has the
+/// lazy-create placeholder email — normally that only happens because no
+/// webhook endpoint is configured for this Clerk instance (see main.rs's
+/// startup warning), so `user.created` never arrives. Calling the API
+/// directly means real email/username shows up on the very next request
+/// instead of staying wrong indefinitely.
+async fn resolve_real_identity_from_clerk(
+    state: &AppState,
+    clerk_user_id: &str,
+) -> Option<(String, Option<String>)> {
+    let secret = state.clerk_secret_key.as_ref()?;
+    let url = format!("https://api.clerk.com/v1/users/{clerk_user_id}");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(secret)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::warn!(
+            "Clerk Backend API lookup for {clerk_user_id} failed: {}",
+            resp.status()
+        );
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let primary_email_id = body.get("primary_email_address_id")?.as_str()?;
+    let email = body
+        .get("email_addresses")?
+        .as_array()?
+        .iter()
+        .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(primary_email_id))
+        .and_then(|e| e.get("email_address"))
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let username = body
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some((email, username))
+}
+
 /// `GET /me` — the reference pattern for every future protected route:
 /// require a verified Clerk JWT (via the `ClerkUser` extractor, which
 /// rejects with 401 before the handler body even runs if the token is
@@ -76,6 +120,47 @@ pub async fn get_or_create_local_user(
     })?;
 
     if let Some(user) = existing {
+        // If this row still has the lazy-create placeholder email (i.e. the
+        // Clerk webhook never delivered a user.created/updated event for
+        // them — see main.rs's startup warning), resolve the real
+        // email/username directly from Clerk's Backend API and heal the row
+        // in place. This runs on every authenticated request until it
+        // succeeds, same self-healing pattern as the staff-grant check
+        // below, so a user isn't stuck with a placeholder email forever
+        // just because the webhook was never configured.
+        let user = if user.email.ends_with("@placeholder.noschat.local") {
+            match resolve_real_identity_from_clerk(state, &claims.sub).await {
+                Some((real_email, real_username)) => {
+                    let healed: UserPublic = sqlx::query_as(
+                        "UPDATE users SET email = $2, username = COALESCE(username, $3)
+                         WHERE id = $1
+                         RETURNING id, clerk_user_id, email, username, is_staff",
+                    )
+                    .bind(user.id)
+                    .bind(&real_email)
+                    .bind(&real_username)
+                    .fetch_one(&state.db)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("failed to heal placeholder email for {}: {e:#}", user.id);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": "internal error" })),
+                        )
+                    })?;
+                    tracing::info!(
+                        "healed placeholder email for {} -> {} (resolved via Clerk Backend API)",
+                        healed.id,
+                        healed.email
+                    );
+                    healed
+                }
+                None => user,
+            }
+        } else {
+            user
+        };
+
         // Re-check staff eligibility on every authenticated request for an
         // existing row too — not just at creation. This means if the dev
         // account's row was created (e.g. by a placeholder email or before
@@ -109,14 +194,22 @@ pub async fn get_or_create_local_user(
 
     // No local row yet. The JWT itself doesn't reliably carry an email
     // claim (Clerk's default session token template doesn't include one),
-    // so if it's missing here we fall back to a clearly-marked placeholder
-    // rather than failing — a subsequent webhook delivery (or the next
-    // manual sync) will overwrite it with the real address via the
-    // `ON CONFLICT ... DO UPDATE` in webhooks.rs.
-    let email = claims
-        .email
-        .clone()
-        .unwrap_or_else(|| format!("{}@placeholder.noschat.local", claims.sub));
+    // so try resolving it directly from Clerk's Backend API first; only
+    // fall back to the placeholder if that's unavailable (no
+    // CLERK_SECRET_KEY configured, or the API call fails) — a subsequent
+    // webhook delivery (or the next request, which re-attempts the API
+    // resolve above) will overwrite it with the real address.
+    let resolved = resolve_real_identity_from_clerk(state, &claims.sub).await;
+    let (email, username_from_clerk) = match resolved {
+        Some((real_email, real_username)) => (real_email, real_username),
+        None => (
+            claims
+                .email
+                .clone()
+                .unwrap_or_else(|| format!("{}@placeholder.noschat.local", claims.sub)),
+            None,
+        ),
+    };
 
     tracing::info!(
         "lazily creating local user row for clerk_user_id={} (no webhook sync seen yet)",
@@ -126,13 +219,14 @@ pub async fn get_or_create_local_user(
     let user: UserPublic = sqlx::query_as(
         r#"
         INSERT INTO users (clerk_user_id, email, username, is_staff)
-        VALUES ($1, $2, NULL, $3)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (clerk_user_id) DO UPDATE SET clerk_user_id = EXCLUDED.clerk_user_id
         RETURNING id, clerk_user_id, email, username, is_staff
         "#,
     )
     .bind(&claims.sub)
     .bind(&email)
+    .bind(&username_from_clerk)
     .bind(is_dev_staff_email(&email))
     .fetch_one(&state.db)
     .await
