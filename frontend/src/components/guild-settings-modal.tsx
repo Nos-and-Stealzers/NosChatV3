@@ -618,6 +618,14 @@ export function GuildSettingsModal({
                           </span>
                         )}
                         <span className="truncate">{label}</span>
+                        {m.is_staff && (
+                          <span
+                            title="NosChat Staff"
+                            className="flex-none rounded-full bg-[#5FD9C4]/15 px-1.5 py-0.5 text-[9px] font-bold tracking-wide text-[#5FD9C4]"
+                          >
+                            STAFF
+                          </span>
+                        )}
                       </span>
                       <div className="flex flex-wrap gap-1">
                         {m.roles.map((r) => (

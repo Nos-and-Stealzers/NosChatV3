@@ -417,6 +417,7 @@ export type GuildMember = {
   username: string | null;
   email: string;
   nickname: string | null;
+  is_staff?: boolean;
   roles: { id: string; name: string; color: string }[];
 };
 

@@ -973,8 +973,8 @@ pub async fn list_members(
     let me = local_user_id(&state, &claims.sub).await?;
     assert_member(&state, guild_id, me).await?;
 
-    let members: Vec<(Uuid, Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, u.username, u.email, gm.nickname
+    let members: Vec<(Uuid, Option<String>, String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT u.id, u.username, u.email, gm.nickname, u.is_staff
          FROM guild_members gm JOIN users u ON u.id = gm.user_id
          WHERE gm.guild_id = $1 ORDER BY u.username",
     )
@@ -1003,12 +1003,13 @@ pub async fn list_members(
 
     let result: Vec<Value> = members
         .into_iter()
-        .map(|(user_id, username, email, nickname)| {
+        .map(|(user_id, username, email, nickname, is_staff)| {
             json!({
                 "user_id": user_id,
                 "username": username,
                 "email": email,
                 "nickname": nickname,
+                "is_staff": is_staff,
                 "roles": roles_by_user.get(&user_id).cloned().unwrap_or_default(),
             })
         })
