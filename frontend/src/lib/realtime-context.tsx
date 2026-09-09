@@ -17,6 +17,7 @@ export type RealtimeEvent =
   | { type: "friend_request"; friendship_id: string; from: string }
   | { type: "friend_accepted"; friendship_id: string; from: string }
   | { type: "typing"; dm_id: string; user_id: string }
+  | { type: "guild_typing"; guild_id: string; channel_id: string; user_id: string }
   // Fanned out to every accepted friend whenever a user's effective status
   // (online/idle/dnd/offline) or status_text changes — see
   // backend/auth-service/src/profiles.rs `broadcast_presence`, called from
@@ -147,6 +148,7 @@ type RealtimeContextValue = {
   // silently if the socket isn't open — typing presence is best-effort by
   // nature, not worth queuing or retrying.
   sendTyping: (dmId: string) => void;
+  sendGuildTyping: (guildId: string, channelId: string) => void;
   // Fire-and-forget: sends any call-signaling event (ring/offer/answer/ICE/
   // end/reject) up the same socket. No-ops silently if the socket isn't
   // open — call-context.tsx is responsible for treating that as a hard
@@ -210,6 +212,13 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "typing", dm_id: dmId }));
+    }
+  }, []);
+
+  const sendGuildTyping = useCallback((guildId: string, channelId: string) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "guild_typing", guild_id: guildId, channel_id: channelId }));
     }
   }, []);
 
@@ -296,6 +305,7 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
         subscribe,
         connected,
         sendTyping,
+        sendGuildTyping,
         sendCallSignal,
         sendGuildSignal,
         reconnectCount,

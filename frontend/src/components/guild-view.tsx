@@ -289,7 +289,7 @@ export function GuildView({
   onUnreadChanged?: (guildId: string, totalUnread: number) => void;
 }) {
   const { getToken } = useAuth();
-  const { subscribe } = useRealtime();
+  const { subscribe, sendGuildTyping } = useRealtime();
   const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare } = useVoice();
   const { fetchProfile } = usePresence();
   const handleContextMenu = useContextMenuHandler();
@@ -304,6 +304,8 @@ export function GuildView({
   const [deafened, setDeafened] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [messagesByChannel, setMessagesByChannel] = useState<Record<string, GuildMessage[]>>({});
+  const [typingByChannel, setTypingByChannel] = useState<Record<string, Set<string>>>({});
+  const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [composer, setComposer] = useState("");
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const attachFileInputRef = useRef<HTMLInputElement>(null);
@@ -514,6 +516,29 @@ export function GuildView({
             ),
           };
         });
+      } else if (event.type === "guild_typing" && event.guild_id === guildId) {
+        const channelId = event.channel_id;
+        const userId = event.user_id;
+        setTypingByChannel((prev) => {
+          const existing = prev[channelId] ?? new Set<string>();
+          const next = new Set(existing);
+          next.add(userId);
+          return { ...prev, [channelId]: next };
+        });
+        // Typing presence has no explicit "stopped" event (matches the DM
+        // typing indicator's own design) — just expire it locally after a
+        // few seconds of silence.
+        const key = `${channelId}:${userId}`;
+        if (typingTimeouts.current[key]) clearTimeout(typingTimeouts.current[key]);
+        typingTimeouts.current[key] = setTimeout(() => {
+          setTypingByChannel((prev) => {
+            const existing = prev[channelId];
+            if (!existing || !existing.has(userId)) return prev;
+            const next = new Set(existing);
+            next.delete(userId);
+            return { ...prev, [channelId]: next };
+          });
+        }, 4000);
       } else if (event.type === "voice_channel_state") {
         setVoicePresence((prev) => ({ ...prev, [event.channel_id]: event.user_ids }));
       } else if (event.type === "voice_user_joined") {
@@ -1387,6 +1412,22 @@ export function GuildView({
                 </div>
               )}
               <div className="relative flex items-end gap-1.5">
+                {(() => {
+                  const typists = [...(typingByChannel[activeChannel.id] ?? [])].filter((id) => id !== myId);
+                  if (typists.length === 0) return null;
+                  const names = typists.map((id) => nameFor(id));
+                  const text =
+                    names.length === 1
+                      ? `${names[0]} is typing…`
+                      : names.length === 2
+                      ? `${names[0]} and ${names[1]} are typing…`
+                      : `${names.length} people are typing…`;
+                  return (
+                    <span className="pointer-events-none absolute -top-5 left-1 truncate text-xs text-[#8B93A1]">
+                      {text}
+                    </span>
+                  );
+                })()}
                 <input
                   ref={attachFileInputRef}
                   type="file"
@@ -1409,7 +1450,10 @@ export function GuildView({
                   ref={composerRef}
                   rows={1}
                   value={composer}
-                  onChange={(e) => setComposer(e.target.value)}
+                  onChange={(e) => {
+                    setComposer(e.target.value);
+                    if (e.target.value.trim()) sendGuildTyping(guildId, activeChannel.id);
+                  }}
                   onKeyDown={handleComposerKeyDown}
                   placeholder={`Message #${activeChannel.name}`}
                   className="max-h-[168px] min-h-12 rounded-3xl border-[#2A2F3A] bg-[#0F1217]/80 py-3 pr-12 pl-11 text-[#E8EAED] placeholder:text-[#8B93A1]/60 focus-visible:border-[#F0A868]/50 focus-visible:ring-[#F0A868]/20"

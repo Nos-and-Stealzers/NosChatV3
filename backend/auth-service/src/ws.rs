@@ -148,6 +148,11 @@ pub struct WsAuthQuery {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientEvent {
     Typing { dm_id: Uuid },
+    /// Same idea as Typing but for a guild text channel — relayed to every
+    /// other member of the guild rather than a fixed 2-party DM (the
+    /// frontend filters to the active channel client-side, same pattern
+    /// list_channel_messages already uses for guild-wide fan-out).
+    GuildTyping { guild_id: Uuid, channel_id: Uuid },
     /// Outbound call invite. `video` distinguishes a voice-only call from a
     /// video call so the callee's UI/getUserMedia request can match.
     CallRing { dm_id: Uuid, video: bool },
@@ -241,6 +246,33 @@ async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent
                 return;
             };
             let payload = json!({ "type": "typing", "dm_id": dm_id, "user_id": user_id });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::GuildTyping { guild_id, channel_id } => {
+            // Confirm the sender is actually a member of this guild before
+            // relaying to everyone else — same "don't trust the socket"
+            // posture as other_participants() for DMs.
+            let members: Vec<(Uuid,)> = match sqlx::query_as(
+                "SELECT gm.user_id FROM guild_members gm WHERE gm.guild_id = $1",
+            )
+            .bind(guild_id)
+            .fetch_all(&state.db)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("ws: failed to look up guild members: {e}");
+                    return;
+                }
+            };
+            let ids: Vec<Uuid> = members.into_iter().map(|(id,)| id).collect();
+            if !ids.contains(&user_id) {
+                return;
+            }
+            let others: Vec<Uuid> = ids.into_iter().filter(|id| *id != user_id).collect();
+            let payload = json!({
+                "type": "guild_typing", "guild_id": guild_id, "channel_id": channel_id, "user_id": user_id,
+            });
             state.ws_hub.send_to_many(&others, payload).await;
         }
         ClientEvent::CallRing { dm_id, video } => {
