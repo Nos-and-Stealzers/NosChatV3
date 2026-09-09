@@ -314,7 +314,7 @@ export function GuildView({
 }) {
   const { getToken } = useAuth();
   const { subscribe, sendGuildTyping } = useRealtime();
-  const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare } = useVoice();
+  const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleDeafen, toggleCamera, toggleScreenShare } = useVoice();
   const { fetchProfile } = usePresence();
   const { settings } = useSettings();
   const handleContextMenu = useContextMenuHandler();
@@ -322,11 +322,10 @@ export function GuildView({
   const [detail, setDetail] = useState<GuildDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [activeChannelId, setActiveChannelId] = useState<string | null>(null);
-  // Deafen is a pure UI/local-playback concept (mute incoming audio
-  // elements) — it doesn't exist in voice-context.tsx's state and doesn't
-  // need to; it never touches the mic track or signaling, just whether we
-  // render remote <audio>/<video> elements muted on our end.
-  const [deafened, setDeafened] = useState(false);
+  // Deafen mutes ALL incoming peer audio at the track level (implemented in
+  // voice-context.tsx's toggleDeafen) plus force-mutes the mic while active,
+  // matching Discord semantics — this used to be a local-only stub that did
+  // nothing to actual audio, now it's real.
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [messagesByChannel, setMessagesByChannel] = useState<Record<string, GuildMessage[]>>({});
   const [typingByChannel, setTypingByChannel] = useState<Record<string, Set<string>>>({});
@@ -1295,10 +1294,10 @@ export function GuildView({
               <Button
                 size="icon-sm"
                 variant="ghost"
-                onClick={() => setDeafened((v) => !v)}
-                title={deafened ? "Undeafen" : "Deafen"}
+                onClick={toggleDeafen}
+                title={voice.deafened ? "Undeafen" : "Deafen"}
               >
-                <Headphones className={`size-4 ${deafened ? "text-[#EB5757]" : ""}`} />
+                <Headphones className={`size-4 ${voice.deafened ? "text-[#EB5757]" : ""}`} />
               </Button>
               <Button
                 size="icon-sm"
@@ -1821,7 +1820,7 @@ export function GuildView({
                               label={nameFor(userId)}
                               stream={peer.stream}
                               micMuted={peer.connectionState !== "connected"}
-                              deafened={deafened}
+                              deafened={voice.deafened}
                             />
                           ))}
                         </div>
@@ -1853,7 +1852,7 @@ export function GuildView({
                               label={nameFor(spotlightId)}
                               stream={voice.peers[spotlightId]?.stream}
                               micMuted={voice.peers[spotlightId]?.connectionState !== "connected"}
-                              deafened={deafened}
+                              deafened={voice.deafened}
                               spotlight
                               screenSharing
                             />
@@ -1879,7 +1878,7 @@ export function GuildView({
                                     label={nameFor(p.id)}
                                     stream={voice.peers[p.id]?.stream}
                                     micMuted={voice.peers[p.id]?.connectionState !== "connected"}
-                                    deafened={deafened}
+                                    deafened={voice.deafened}
                                   />
                                 </div>
                               ),
@@ -1906,9 +1905,9 @@ export function GuildView({
                     </Button>
                     <Button
                       size="icon-lg"
-                      variant={deafened ? "destructive" : "secondary"}
-                      onClick={() => setDeafened((v) => !v)}
-                      title={deafened ? "Undeafen" : "Deafen"}
+                      variant={voice.deafened ? "destructive" : "secondary"}
+                      onClick={toggleDeafen}
+                      title={voice.deafened ? "Undeafen" : "Deafen"}
                     >
                       <Headphones className="size-4" />
                     </Button>

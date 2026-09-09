@@ -45,6 +45,7 @@ export type VoiceState = {
   guildId: string | null;
   peers: Record<string /* user_id */, VoicePeerState>;
   micMuted: boolean;
+  deafened: boolean;
   cameraOn: boolean;
   screenSharing: boolean;
   screenSharingPeerIds: string[];
@@ -56,6 +57,7 @@ const IDLE_STATE: VoiceState = {
   guildId: null,
   peers: {},
   micMuted: false,
+  deafened: false,
   cameraOn: false,
   screenSharing: false,
   screenSharingPeerIds: [],
@@ -80,6 +82,7 @@ type VoiceContextValue = {
   joinVoiceChannel: (guildId: string, channelId: string) => Promise<void>;
   leaveVoiceChannel: () => void;
   toggleMic: () => void;
+  toggleDeafen: () => void;
   toggleCamera: () => Promise<void>;
   toggleScreenShare: () => Promise<void>;
 };
@@ -150,6 +153,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     micMutedRef.current = false;
     cameraOnRef.current = false;
     screenSharingRef.current = false;
+    deafenedRef.current = false;
     setVoice(IDLE_STATE);
   }, [teardownPeer]);
 
@@ -183,6 +187,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
 
       pc.ontrack = (evt) => {
         const [stream] = evt.streams;
+        if (deafenedRef.current) evt.track.enabled = false;
         setVoice((prev) => ({
           ...prev,
           peers: {
@@ -280,6 +285,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           guildId,
           peers: {},
           micMuted: micMutedRef.current,
+          deafened: false,
           cameraOn: false,
           screenSharing: false,
           screenSharingPeerIds: [],
@@ -308,6 +314,35 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     stream.getAudioTracks().forEach((t) => (t.enabled = !nextMuted));
     micMutedRef.current = nextMuted;
     setVoice((prev) => ({ ...prev, micMuted: nextMuted }));
+  }, []);
+
+  // Deafen mutes ALL incoming peer audio (every remote track across every
+  // peer connection) — distinct from mic mute, matching Discord: deafening
+  // also force-mutes your own mic (you can't hear anyone, so there's no
+  // point them hearing you either), and un-deafening restores your prior
+  // mic state rather than always unmuting.
+  const deafenedRef = useRef(false);
+  const preDeafenMicMutedRef = useRef(false);
+  const toggleDeafen = useCallback(() => {
+    const nextDeafened = !deafenedRef.current;
+    deafenedRef.current = nextDeafened;
+    for (const session of Object.values(peersRef.current)) {
+      for (const receiver of session.pc.getReceivers()) {
+        if (receiver.track.kind === "audio") receiver.track.enabled = !nextDeafened;
+      }
+    }
+    if (nextDeafened) {
+      preDeafenMicMutedRef.current = micMutedRef.current;
+      const stream = localStreamRef.current;
+      stream?.getAudioTracks().forEach((t) => (t.enabled = false));
+      micMutedRef.current = true;
+    } else {
+      const stream = localStreamRef.current;
+      const restoreMuted = preDeafenMicMutedRef.current;
+      stream?.getAudioTracks().forEach((t) => (t.enabled = !restoreMuted));
+      micMutedRef.current = restoreMuted;
+    }
+    setVoice((prev) => ({ ...prev, deafened: nextDeafened, micMuted: micMutedRef.current }));
   }, []);
 
   // Renegotiates every existing peer connection after the local track set
@@ -571,7 +606,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <VoiceContext.Provider
-      value={{ voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare }}
+      value={{ voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleDeafen, toggleCamera, toggleScreenShare }}
     >
       {children}
     </VoiceContext.Provider>
