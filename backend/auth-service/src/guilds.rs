@@ -701,13 +701,13 @@ pub async fn get_guild(
     let me = local_user_id(&state, &claims.sub).await?;
     assert_member(&state, guild_id, me).await?;
 
-    let guild: Option<(Uuid, String, String, Uuid)> =
-        sqlx::query_as("SELECT id, name, icon_color, owner_id FROM guilds WHERE id = $1")
+    let guild: Option<(Uuid, String, String, Uuid, i16)> =
+        sqlx::query_as("SELECT id, name, icon_color, owner_id, verification_level FROM guilds WHERE id = $1")
             .bind(guild_id)
             .fetch_optional(&state.db)
             .await
             .map_err(internal_err)?;
-    let Some((id, name, icon_color, owner_id)) = guild else {
+    let Some((id, name, icon_color, owner_id, verification_level)) = guild else {
         return Err(not_found("guild not found"));
     };
 
@@ -753,6 +753,7 @@ pub async fn get_guild(
         "name": name,
         "icon_color": icon_color,
         "owner_id": owner_id,
+        "verification_level": verification_level,
         "my_permissions": bits,
         "my_roles": my_roles,
         "categories": categories,
@@ -764,6 +765,7 @@ pub async fn get_guild(
 pub struct UpdateGuildBody {
     pub name: Option<String>,
     pub icon_color: Option<String>,
+    pub verification_level: Option<i16>,
 }
 
 /// `PATCH /guilds/:id` — requires MANAGE_GUILD.
@@ -776,22 +778,30 @@ pub async fn update_guild(
     let me = local_user_id(&state, &claims.sub).await?;
     require_permission(&state, guild_id, me, PERM_MANAGE_GUILD).await?;
 
-    let row: Option<(Uuid, String, String)> = sqlx::query_as(
-        "UPDATE guilds SET name = COALESCE($2, name), icon_color = COALESCE($3, icon_color), updated_at = now()
-         WHERE id = $1 RETURNING id, name, icon_color",
+    if let Some(lvl) = body.verification_level {
+        if !(0..=1).contains(&lvl) {
+            return Err(bad_request("verification_level must be 0 or 1"));
+        }
+    }
+
+    let row: Option<(Uuid, String, String, i16)> = sqlx::query_as(
+        "UPDATE guilds SET name = COALESCE($2, name), icon_color = COALESCE($3, icon_color),
+             verification_level = COALESCE($4, verification_level), updated_at = now()
+         WHERE id = $1 RETURNING id, name, icon_color, verification_level",
     )
     .bind(guild_id)
     .bind(body.name)
     .bind(body.icon_color)
+    .bind(body.verification_level)
     .fetch_optional(&state.db)
     .await
     .map_err(internal_err)?;
 
-    let Some((id, name, icon_color)) = row else {
+    let Some((id, name, icon_color, verification_level)) = row else {
         return Err(not_found("guild not found"));
     };
 
-    Ok(Json(json!({ "id": id, "name": name, "icon_color": icon_color })))
+    Ok(Json(json!({ "id": id, "name": name, "icon_color": icon_color, "verification_level": verification_level })))
 }
 
 const MAX_ICON_BYTES: usize = 2 * 1024 * 1024; // 2MB — same inline-in-Postgres cap as sounds.rs
@@ -1494,6 +1504,29 @@ pub async fn send_channel_message(
     let me = local_user_id(&state, &claims.sub).await?;
     require_permission(&state, guild_id, me, PERM_SEND_MESSAGES).await?;
     assert_text_channel(&state, guild_id, channel_id).await?;
+
+    // Verification level enforcement — real server-side gate (Discord's
+    // "must be a member for X" tier), not just a client-side hint.
+    // Moderators (MANAGE_MESSAGES) bypass it, same rationale as slow mode.
+    let (verification_level,): (i16,) = sqlx::query_as("SELECT verification_level FROM guilds WHERE id = $1")
+        .bind(guild_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if verification_level >= 1 && !has_permission(&state, guild_id, me, PERM_MANAGE_MESSAGES).await.unwrap_or(false) {
+        let (created_at,): (chrono::DateTime<Utc>,) = sqlx::query_as("SELECT created_at FROM users WHERE id = $1")
+            .bind(me)
+            .fetch_one(&state.db)
+            .await
+            .map_err(internal_err)?;
+        let account_age_secs = (Utc::now() - created_at).num_seconds();
+        const MIN_ACCOUNT_AGE_SECS: i64 = 10 * 60; // 10 minutes, matching Discord's "Low" tier
+        if account_age_secs < MIN_ACCOUNT_AGE_SECS {
+            return Err(forbidden(
+                "this server requires your account to be at least 10 minutes old to send messages",
+            ));
+        }
+    }
 
     // Slow mode enforcement — real server-side rate limit, not just a UI
     // hint. Members with MANAGE_MESSAGES bypass it (matches Discord: mods

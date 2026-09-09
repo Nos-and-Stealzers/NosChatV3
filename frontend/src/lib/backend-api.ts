@@ -405,6 +405,7 @@ export type GuildDetail = {
   name: string;
   icon_color: string;
   owner_id: string;
+  verification_level: number;
   my_permissions: number;
   categories: ChannelCategory[];
   channels: GuildChannel[];
@@ -486,7 +487,7 @@ export function getGuild(token: string, guildId: string) {
 export function updateGuild(
   token: string,
   guildId: string,
-  patch: { name?: string; icon_color?: string },
+  patch: { name?: string; icon_color?: string; verification_level?: number },
 ) {
   return req<GuildDetail>(`/guilds/${guildId}`, token, {
     method: "PATCH",

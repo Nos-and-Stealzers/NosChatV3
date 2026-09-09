@@ -123,6 +123,7 @@ export function GuildSettingsModal({
   const [newInviteMaxUses, setNewInviteMaxUses] = useState("");
   const [newInviteExpiry, setNewInviteExpiry] = useState("");
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
+  const [verificationLevelDraft, setVerificationLevelDraft] = useState(0);
 
   useEffect(() => {
     if (!open) return;
@@ -141,6 +142,7 @@ export function GuildSettingsModal({
       setDetail(d);
       setNameDraft(d.name);
       setColorDraft(d.icon_color);
+      setVerificationLevelDraft(d.verification_level);
       if (hasPermission(d.my_permissions, PERMISSIONS.MANAGE_ROLES)) {
         setRoles(await listRoles(token, guildId));
       }
@@ -190,7 +192,7 @@ export function GuildSettingsModal({
     try {
       const token = await getToken();
       if (!token) return;
-      await updateGuild(token, guildId, { name: nameDraft.trim(), icon_color: colorDraft });
+      await updateGuild(token, guildId, { name: nameDraft.trim(), icon_color: colorDraft, verification_level: verificationLevelDraft });
       await refresh();
       onGuildUpdated?.();
     } catch (e) {
@@ -492,6 +494,33 @@ export function GuildSettingsModal({
                           boxShadow: colorDraft === c ? `0 0 0 2px #12151A, 0 0 0 4px ${c}` : undefined,
                         }}
                       />
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                    Verification Level
+                  </label>
+                  <p className="mb-2 text-xs text-[#8B93A1]">
+                    Controls who can send messages in this server.
+                  </p>
+                  <div className="flex gap-2">
+                    {[
+                      { value: 0, label: "None", desc: "Unrestricted" },
+                      { value: 1, label: "Low", desc: "Account must be 10+ min old" },
+                    ].map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setVerificationLevelDraft(opt.value)}
+                        className={`flex-1 rounded-lg border px-3 py-2 text-left transition-colors ${
+                          verificationLevelDraft === opt.value
+                            ? "border-[#F0A868] bg-[#F0A868]/10"
+                            : "border-[#2A2F3A] bg-[#0F1217]/80 hover:border-[#3A4050]"
+                        }`}
+                      >
+                        <p className="text-sm font-medium text-[#E8EAED]">{opt.label}</p>
+                        <p className="text-[11px] text-[#8B93A1]">{opt.desc}</p>
+                      </button>
                     ))}
                   </div>
                 </div>
