@@ -77,6 +77,28 @@ export type Friendship = {
   email: string;
 };
 
+export type BlockedUser = {
+  user_id: string;
+  username: string | null;
+  email: string;
+  blocked_at: string;
+};
+
+export function blockUser(token: string, userId: string) {
+  return req<{ status: string }>("/friends/block", token, {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
+}
+
+export function unblockUser(token: string, userId: string) {
+  return req<void>(`/friends/block/${userId}`, token, { method: "DELETE" });
+}
+
+export function listBlockedUsers(token: string) {
+  return req<BlockedUser[]>("/friends/blocked", token);
+}
+
 export function listFriends(token: string) {
   return req<Friendship[]>("/friends", token);
 }

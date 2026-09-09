@@ -80,6 +80,13 @@ pub async fn send_request(
         ));
     }
 
+    if is_blocked_either_way(&state, me, target_id).await.map_err(internal_err)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "can't send a friend request — blocked" })),
+        ));
+    }
+
     // Is there already a row for this pair, in either direction?
     let existing: Option<(Uuid, Uuid, String)> = sqlx::query_as(
         "SELECT id, requester_id, status FROM friendships
@@ -249,4 +256,110 @@ pub async fn list_friends(
     .map_err(internal_err)?;
 
     Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+pub struct BlockUserBody {
+    pub user_id: Uuid,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct BlockedUserView {
+    pub user_id: Uuid,
+    pub username: Option<String>,
+    pub email: String,
+    pub blocked_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `POST /friends/block` `{ "user_id": "..." }` — blocks a user: removes
+/// any existing friendship (either direction) and any pending requests
+/// between the two, then records the block. Blocking someone also stops
+/// them from being able to DM you or send you a friend request (enforced
+/// in send_request and dms::open_dm).
+pub async fn block_user(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Json(body): Json<BlockUserBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    if body.user_id == me {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "can't block yourself" }))));
+    }
+
+    sqlx::query(
+        "DELETE FROM friendships WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)",
+    )
+    .bind(me)
+    .bind(body.user_id)
+    .execute(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    sqlx::query(
+        "INSERT INTO blocked_users (blocker_id, blocked_id) VALUES ($1, $2)
+         ON CONFLICT (blocker_id, blocked_id) DO NOTHING",
+    )
+    .bind(me)
+    .bind(body.user_id)
+    .execute(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(json!({ "status": "blocked" })))
+}
+
+/// `DELETE /friends/block/:user_id` — unblocks. Does not restore any
+/// prior friendship; the other person would need to send a fresh request.
+pub async fn unblock_user(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(user_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+
+    sqlx::query("DELETE FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2")
+        .bind(me)
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /friends/blocked` — the caller's block list.
+pub async fn list_blocked(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+) -> Result<Json<Vec<BlockedUserView>>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+
+    let rows: Vec<BlockedUserView> = sqlx::query_as(
+        "SELECT u.id AS user_id, u.username, u.email, b.created_at AS blocked_at
+         FROM blocked_users b
+         JOIN users u ON u.id = b.blocked_id
+         WHERE b.blocker_id = $1
+         ORDER BY b.created_at DESC",
+    )
+    .bind(me)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+
+    Ok(Json(rows))
+}
+
+/// Returns true if either user has blocked the other — used to gate
+/// friend requests and DM creation both directions.
+pub async fn is_blocked_either_way(state: &AppState, a: Uuid, b: Uuid) -> Result<bool, sqlx::Error> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM blocked_users
+         WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+         LIMIT 1",
+    )
+    .bind(a)
+    .bind(b)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row.is_some())
 }

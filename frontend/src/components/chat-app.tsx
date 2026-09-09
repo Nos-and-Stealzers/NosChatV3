@@ -28,6 +28,7 @@ import {
   Smile,
   Inbox,
   ShieldCheck,
+  ShieldOff,
   Pencil,
   Reply,
   Trash2,
@@ -62,6 +63,10 @@ import {
   renameGroupDm,
   addGroupDmParticipant,
   leaveGroupDm,
+  blockUser,
+  unblockUser,
+  listBlockedUsers,
+  type BlockedUser,
   type Friendship,
   type DmSummary,
   type Message,
@@ -607,6 +612,39 @@ export function ChatApp({
     }
   }, [getToken]);
 
+  const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
+  const refreshBlocked = useCallback(async () => {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      setBlockedUsers(await listBlockedUsers(token));
+    } catch {
+      // Non-fatal — blocked list just won't show this round.
+    }
+  }, [getToken]);
+
+  async function handleBlockUser(userId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await blockUser(token, userId);
+      await Promise.all([refreshFriends(), refreshBlocked(), refreshDms()]);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Failed to block user");
+    }
+  }
+
+  async function handleUnblockUser(userId: string) {
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await unblockUser(token, userId);
+      await refreshBlocked();
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Failed to unblock user");
+    }
+  }
+
   const refreshGuilds = useCallback(async () => {
     const token = await getToken();
     if (!token) return;
@@ -638,7 +676,7 @@ export function ChatApp({
             : "Backend sync issue — is the auth-service running?",
         );
       }
-      await Promise.all([refreshFriends(), refreshDms(), refreshGuilds()]);
+      await Promise.all([refreshFriends(), refreshBlocked(), refreshDms(), refreshGuilds()]);
       setInitialLoading(false);
     })();
     // Runs once on mount — refreshFriends/refreshDms are stable-enough
@@ -1535,12 +1573,52 @@ export function ChatApp({
                           >
                             <MessageSquare className="size-3.5" /> Message
                           </Button>
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            onClick={() => void handleBlockUser(f.user_id)}
+                            title="Block"
+                            className="opacity-100 transition-opacity hover:bg-[#EB5757]/10 focus-visible:ring-[#EB5757]/40 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+                          >
+                            <ShieldOff className="size-3.5 text-[#EB5757]" />
+                          </Button>
                         </div>
                       );
                     })}
                   </div>
                 )}
               </div>
+
+              {blockedUsers.length > 0 && (
+                <div className="mt-8">
+                  <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.15em] text-[#8B93A1]">
+                    Blocked — {blockedUsers.length}
+                  </p>
+                  <div className="space-y-1.5">
+                    {blockedUsers.map((b) => {
+                      const label = b.username ?? b.email;
+                      return (
+                        <div
+                          key={b.user_id}
+                          className="flex items-center gap-3 rounded-xl border border-[#1D2129] bg-[#12151B]/50 px-3 py-2.5"
+                        >
+                          <AvatarWithProfile userId={b.user_id} label={label} />
+                          <span className="min-w-0 flex-1 truncate text-sm text-[#8B93A1]">
+                            {label}
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => void handleUnblockUser(b.user_id)}
+                          >
+                            Unblock
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           </>
         ) : (
