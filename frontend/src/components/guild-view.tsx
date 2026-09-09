@@ -458,6 +458,16 @@ export function GuildView({
     return memberNames[userId] ?? userId;
   }
 
+  // Discord-style role color: the member's highest-position role that has
+  // a non-default color wins (roles come back from list_members already
+  // ordered by position DESC, so [0] is highest). Falls back to the
+  // default text color if the member has no colored role.
+  function roleColorFor(userId: string): string | null {
+    const m = members.find((mm) => mm.user_id === userId);
+    const colored = m?.roles.find((r) => r.color && r.color.toLowerCase() !== "#99aab5" && r.color.toLowerCase() !== "#e8eaed");
+    return colored?.color ?? null;
+  }
+
   // Default to the first text channel once channels load.
   useEffect(() => {
     if (!detail || activeChannelId) return;
@@ -1360,7 +1370,10 @@ export function GuildView({
                         <ClickableAvatar userId={m.sender_id} label={nameFor(m.sender_id)} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
-                            <span className="text-sm font-semibold text-[#E8EAED]">
+                            <span
+                              className="text-sm font-semibold text-[#E8EAED]"
+                              style={roleColorFor(m.sender_id) ? { color: roleColorFor(m.sender_id)! } : undefined}
+                            >
                               {nameFor(m.sender_id)}
                             </span>
                             <span className="font-mono text-[10px] text-[#8B93A1]">
@@ -1587,7 +1600,10 @@ export function GuildView({
                               }
                             >
                               <ClickableAvatar userId={m.user_id} label={label} size="sm" />
-                              <span className="min-w-0 flex-1 truncate text-sm text-[#C7CDD6]">
+                              <span
+                                className="min-w-0 flex-1 truncate text-sm text-[#C7CDD6]"
+                                style={roleColorFor(m.user_id) ? { color: roleColorFor(m.user_id)! } : undefined}
+                              >
                                 {m.user_id === myId ? "You" : label}
                               </span>
                               {inVoice && (

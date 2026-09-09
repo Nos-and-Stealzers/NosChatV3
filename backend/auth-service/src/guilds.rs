@@ -1062,7 +1062,8 @@ pub async fn list_members(
     let role_rows: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
         "SELECT gmr.user_id, r.id, r.name, r.color
          FROM guild_member_roles gmr JOIN guild_roles r ON r.id = gmr.role_id
-         WHERE gmr.guild_id = $1",
+         WHERE gmr.guild_id = $1
+         ORDER BY r.position DESC",
     )
     .bind(guild_id)
     .fetch_all(&state.db)
