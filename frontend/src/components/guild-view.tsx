@@ -39,7 +39,9 @@ import {
   Video,
   VideoOff,
   Maximize2,
+  Copy,
 } from "lucide-react";
+import { useContextMenuHandler } from "@/lib/context-menu";
 import { Button } from "@/components/ui/button";
 import { AttachmentPreview } from "@/components/attachment-preview";
 import { Textarea } from "@/components/ui/textarea";
@@ -283,6 +285,7 @@ export function GuildView({
   const { subscribe } = useRealtime();
   const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare } = useVoice();
   const { fetchProfile } = usePresence();
+  const handleContextMenu = useContextMenuHandler();
 
   const [detail, setDetail] = useState<GuildDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1088,7 +1091,23 @@ export function GuildView({
                     const mine = m.sender_id === myId;
                     const canDelete = mine || canManageMessages;
                     return (
-                      <div key={m.id} className="group/msg animate-rise-in flex gap-2.5">
+                      <div
+                        key={m.id}
+                        className="group/msg animate-rise-in flex gap-2.5"
+                        onContextMenu={handleContextMenu(() => [
+                          { kind: "item" as const, label: "Copy Text", icon: Copy, onSelect: () => void navigator.clipboard.writeText(m.content) },
+                          { kind: "item" as const, label: "Copy Message ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(m.id) },
+                          ...(mine || canDelete
+                            ? [
+                                { kind: "separator" as const },
+                                ...(mine
+                                  ? [{ kind: "item" as const, label: "Edit Message", icon: Pencil, onSelect: () => startEditMessage(m) }]
+                                  : []),
+                                { kind: "item" as const, label: "Delete Message", icon: Trash2, danger: true, onSelect: () => setPendingDeleteMessage({ channelId: activeChannel.id, id: m.id }) },
+                              ]
+                            : []),
+                        ])}
+                      >
                         <ClickableAvatar userId={m.sender_id} label={nameFor(m.sender_id)} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">

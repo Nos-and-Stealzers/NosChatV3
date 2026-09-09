@@ -31,7 +31,10 @@ import {
   Pencil,
   Trash2,
   UserPlus,
+  SmilePlus,
+  Hash,
 } from "lucide-react";
+import { useContextMenuHandler, type ContextMenuItem } from "@/lib/context-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AttachmentPreview } from "@/components/attachment-preview";
@@ -366,6 +369,7 @@ export function ChatApp({
   const { getToken } = useAuth();
   const { subscribe, connected, sendTyping, reconnectCount, lastEventType, lastEventAt, forceDisconnect } = useRealtime();
   const { statusOf } = usePresence();
+  const handleContextMenu = useContextMenuHandler();
   // dm.other_user_id is nullable in the wire type; wraps statusOf to keep
   // the JSX call sites terse.
   function statusOfDm(otherUserId: string | null) {
@@ -1008,6 +1012,13 @@ export function ChatApp({
   return (
     <div
       className={`noschat-app flex h-dvh w-full overflow-hidden bg-[#0B0D12] ${settings.compactHeaderHeight ? "[&_.noschat-header]:h-12" : ""}`}
+      onContextMenu={handleContextMenu(() => [
+        { kind: "label" as const, label: "NosChat" },
+        { kind: "item" as const, label: "Reload", icon: undefined, onSelect: () => window.location.reload() },
+        { kind: "item" as const, label: "Copy Link to This Page", icon: Copy, onSelect: () => void navigator.clipboard.writeText(window.location.href) },
+        { kind: "separator" as const },
+        { kind: "item" as const, label: "Open Settings", icon: Settings, onSelect: () => setSettingsOpen(true) },
+      ])}
     >
       {/* rail — the app switcher strip; only meaningful once there's more
           than one panel on screen, so it's desktop-only. */}
@@ -1541,6 +1552,19 @@ export function ChatApp({
                             <div
                               key={m.id}
                               className="group/msg flex items-end gap-2"
+                              onContextMenu={handleContextMenu(() => [
+                                { kind: "item" as const, label: "Copy Text", icon: Copy, onSelect: () => void handleCopyMessage(m.id, m.content) },
+                                { kind: "item" as const, label: "Copy Message ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(m.id) },
+                                ...(mine
+                                  ? [
+                                      { kind: "separator" as const },
+                                      { kind: "item" as const, label: "Edit Message", icon: Pencil, onSelect: () => startEditMessage(m) },
+                                      { kind: "item" as const, label: "Delete Message", icon: Trash2, danger: true, onSelect: () => setPendingDeleteMessage({ dmId: view.dmId, id: m.id }) },
+                                    ]
+                                  : []),
+                                { kind: "separator" as const },
+                                { kind: "item" as const, label: "Add Reaction", icon: SmilePlus, onSelect: () => void handleToggleReaction(view.dmId, m.id, "👍") },
+                              ])}
                             >
                               {mine && (
                                 <span
