@@ -177,6 +177,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/dms", get(dms::list_dms).post(dms::open_dm))
         .route("/dms/group", post(dms::create_group_dm))
         .route("/dms/{id}/name", axum::routing::patch(dms::rename_group_dm))
+        .route("/dms/{id}/participants", post(dms::add_group_dm_participant))
+        .route("/dms/{id}/participants/me", axum::routing::delete(dms::leave_group_dm))
         .route("/dms/{id}/messages", get(dms::list_messages).post(dms::send_message))
         .route("/dms/{dm_id}/messages/{message_id}", axum::routing::patch(dms::edit_message).delete(dms::delete_message))
         .route("/dms/{dm_id}/messages/{message_id}/reactions", post(dms::toggle_reaction))

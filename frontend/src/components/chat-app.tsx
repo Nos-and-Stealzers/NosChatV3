@@ -59,6 +59,8 @@ import {
   toggleDmReaction,
   dmDisplayLabel,
   renameGroupDm,
+  addGroupDmParticipant,
+  leaveGroupDm,
   type Friendship,
   type DmSummary,
   type Message,
@@ -1038,6 +1040,33 @@ export function ChatApp({
     }
   }
 
+  const [addMemberOpen, setAddMemberOpen] = useState(false);
+  async function handleAddGroupMember(userId: string) {
+    if (!activeDm) return;
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await addGroupDmParticipant(token, activeDm.id, userId);
+      setAddMemberOpen(false);
+      void refreshDms();
+    } catch (e) {
+      console.warn("failed to add group member", e);
+    }
+  }
+
+  async function handleLeaveGroup() {
+    if (!activeDm) return;
+    const token = await getToken();
+    if (!token) return;
+    try {
+      await leaveGroupDm(token, activeDm.id);
+      setDms((prev) => prev.filter((d) => d.id !== activeDm.id));
+      openFriendsView();
+    } catch (e) {
+      console.warn("failed to leave group", e);
+    }
+  }
+
   // Resolves a display label for whoever's on the other end of a call from
   // just their user id — checks the DM list first (covers the common case
   // of calling from within an open conversation), then falls back to the
@@ -1565,6 +1594,27 @@ export function ChatApp({
                 </p>
               </div>
               <div className="flex flex-none items-center gap-1">
+                {activeDm?.is_group && (
+                  <>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      onClick={() => setAddMemberOpen(true)}
+                      title="Add member"
+                    >
+                      <UserPlus className="size-4" />
+                    </Button>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      onClick={() => void handleLeaveGroup()}
+                      title="Leave group"
+                      className="hover:text-[#EB5757]"
+                    >
+                      <LogOut className="size-4" />
+                    </Button>
+                  </>
+                )}
                 <Button
                   size="icon-sm"
                   variant="ghost"
@@ -1948,6 +1998,43 @@ export function ChatApp({
           setMobileShowDetail(true);
         }}
       />
+
+      {addMemberOpen && activeDm?.is_group && (
+        <div
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setAddMemberOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="animate-rise-in w-full max-w-sm rounded-2xl border border-white/[0.06] bg-gradient-to-b from-[#1E232C] to-[#161A20] p-4 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.85)]"
+          >
+            <h3 className="mb-3 font-display text-lg italic text-[#E8EAED]">Add to Group</h3>
+            <div className="noschat-scroll max-h-72 space-y-1 overflow-y-auto">
+              {friends
+                .filter((f) => f.status === "accepted")
+                .map((f) => {
+                  const label = f.username ?? f.email;
+                  return (
+                    <button
+                      key={f.user_id}
+                      onClick={() => void handleAddGroupMember(f.user_id)}
+                      className="noschat-hover-lift flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-[#E8EAED] transition-colors hover:bg-[#1B1F27]"
+                    >
+                      <Avatar seed={f.user_id} label={label} size="sm" />
+                      <span className="truncate">{label}</span>
+                    </button>
+                  );
+                })}
+              {friends.filter((f) => f.status === "accepted").length === 0 && (
+                <p className="px-2.5 py-2 text-sm text-[#8B93A1]">No friends to add.</p>
+              )}
+            </div>
+            <Button variant="ghost" className="mt-3 w-full" onClick={() => setAddMemberOpen(false)}>
+              Close
+            </Button>
+          </div>
+        </div>
+      )}
 
       {view.kind === "guild" && (
         <GuildSettingsModal

@@ -181,6 +181,21 @@ export function listMessages(token: string, dmId: string) {
   return req<Message[]>(`/dms/${dmId}/messages`, token);
 }
 
+/** Adds a friend to an existing group DM. Only works on groups, and the
+ * added user must already be an accepted friend of the caller. */
+export function addGroupDmParticipant(token: string, dmId: string, userId: string) {
+  return req<{ status: string }>(`/dms/${dmId}/participants`, token, {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
+}
+
+/** Leaves a group DM. 1:1 DMs can't be left this way. */
+export function leaveGroupDm(token: string, dmId: string) {
+  return req<void>(`/dms/${dmId}/participants/me`, token, { method: "DELETE" });
+}
+
+
 export function sendMessage(token: string, dmId: string, content: string, file?: File) {
   const form = new FormData();
   form.set("content", content);

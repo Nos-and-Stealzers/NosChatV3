@@ -388,6 +388,122 @@ pub async fn rename_group_dm(
     Ok(Json(json!({ "id": dm_id, "name": name })))
 }
 
+#[derive(Deserialize)]
+pub struct AddParticipantBody {
+    pub user_id: Uuid,
+}
+
+/// `POST /dms/:id/participants` — adds a friend to an existing group DM.
+/// Any current participant may add someone (matches rename's "no owner"
+/// permission model). The new participant must be a friend of the
+/// inviter (same trust bar as creating the group in the first place),
+/// and the 10-person cap from create_group_dm applies here too.
+pub async fn add_group_dm_participant(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(dm_id): Path<Uuid>,
+    Json(body): Json<AddParticipantBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_participant(&state, dm_id, me).await?;
+
+    let is_group: Option<(bool,)> = sqlx::query_as("SELECT is_group FROM dm_channels WHERE id = $1")
+        .bind(dm_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if !matches!(is_group, Some((true,))) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "only group DMs support adding participants" })),
+        ));
+    }
+
+    if !are_friends(&state, me, body.user_id).await.map_err(internal_err)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "you can only add accepted friends to a group" })),
+        ));
+    }
+
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM dm_participants WHERE dm_id = $1")
+        .bind(dm_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if count.0 >= 10 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "a group DM allows at most 10 participants total" })),
+        ));
+    }
+
+    sqlx::query("INSERT INTO dm_participants (dm_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(dm_id)
+        .bind(body.user_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    let participants: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1")
+        .bind(dm_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+    let recipient_ids: Vec<Uuid> = participants.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "dm_participant_added", "dm_id": dm_id, "user_id": body.user_id,
+    })).await;
+
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+/// `DELETE /dms/:id/participants/me` — leave a group DM (removes yourself,
+/// matching Discord's "Leave Group" action). 1:1 DMs can't be left this
+/// way — there's no concept of leaving a 1:1 conversation, only closing
+/// it client-side, which this app doesn't model server-side at all.
+pub async fn leave_group_dm(
+    State(state): State<AppState>,
+    ClerkUser(claims): ClerkUser,
+    Path(dm_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let me = local_user_id(&state, &claims.sub).await?;
+    assert_participant(&state, dm_id, me).await?;
+
+    let is_group: Option<(bool,)> = sqlx::query_as("SELECT is_group FROM dm_channels WHERE id = $1")
+        .bind(dm_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_err)?;
+    if !matches!(is_group, Some((true,))) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "only group DMs can be left — 1:1 conversations can't" })),
+        ));
+    }
+
+    let remaining: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM dm_participants WHERE dm_id = $1 AND user_id != $2")
+        .bind(dm_id)
+        .bind(me)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    sqlx::query("DELETE FROM dm_participants WHERE dm_id = $1 AND user_id = $2")
+        .bind(dm_id)
+        .bind(me)
+        .execute(&state.db)
+        .await
+        .map_err(internal_err)?;
+
+    let recipient_ids: Vec<Uuid> = remaining.into_iter().map(|(id,)| id).collect();
+    state.ws_hub.send_to_many(&recipient_ids, json!({
+        "type": "dm_participant_left", "dm_id": dm_id, "user_id": me,
+    })).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Serialize, sqlx::FromRow)]
 pub struct MessageView {
     pub id: Uuid,
