@@ -834,13 +834,16 @@ export function ChatApp({
         // lights up — otherwise a background server would never show
         // activity until you happened to click into it.
         const isActiveGuild = view.kind === "guild" && view.guildId === event.guild_id;
-        if (!isActiveGuild && event.message.sender_id !== myId) {
-          setUnreadByGuild((prev) => ({
-            ...prev,
-            [event.guild_id]: (prev[event.guild_id] ?? 0) + 1,
-          }));
+        const mentioned = myId !== null && event.message.content.includes(`<@${myId}>`);
+        if ((!isActiveGuild || mentioned) && event.message.sender_id !== myId) {
+          if (!isActiveGuild) {
+            setUnreadByGuild((prev) => ({
+              ...prev,
+              [event.guild_id]: (prev[event.guild_id] ?? 0) + 1,
+            }));
+          }
           if (!event.message.is_system) {
-            void sound.play("message");
+            void sound.play(mentioned ? "ringtone" : "message");
             if (
               settingsRef.current.desktopNotificationsEnabled &&
               typeof Notification !== "undefined" &&
@@ -849,7 +852,7 @@ export function ChatApp({
               const body = settingsRef.current.notificationPreviewText
                 ? event.message.content
                 : "New message";
-              new Notification("NosChat", { body });
+              new Notification(mentioned ? "You were mentioned" : "NosChat", { body });
             }
             if (settingsRef.current.vibrateOnMobile && "vibrate" in navigator) {
               navigator.vibrate?.(80);

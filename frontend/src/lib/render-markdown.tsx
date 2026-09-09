@@ -100,13 +100,40 @@ function Spoiler({ children }: { children: ReactNode }) {
  * Renders Discord-style markdown for a full message body: splits on
  * fenced ```code blocks``` first (which span lines and are never
  * inline-formatted inside), then applies renderInline to every other
- * line, preserving line breaks.
+ * line, preserving line breaks. `resolveMention`, if given, turns a
+ * `<@userId>` token into a highlighted @name chip (used for real
+ * @mentions); without it, mention tokens render as literal text.
  */
-export function renderMarkdown(content: string, keyPrefix = "md"): ReactNode {
-  const blockParts = content.split(/(```[\s\S]*?```)/g);
+export function renderMarkdown(
+  content: string,
+  keyPrefix = "md",
+  opts?: { resolveMention?: (userId: string) => string | null; currentUserId?: string | null },
+): ReactNode {
+  const blockParts = content.split(/(```[\s\S]*?```|<@[a-f0-9-]{36}>)/g);
   const out: ReactNode[] = [];
   let blockIdx = 0;
   for (const part of blockParts) {
+    const mentionMatch = /^<@([a-f0-9-]{36})>$/.exec(part);
+    if (mentionMatch && opts?.resolveMention) {
+      const uid = mentionMatch[1];
+      const label = opts.resolveMention(uid);
+      if (label) {
+        const isMe = opts.currentUserId === uid;
+        out.push(
+          <span
+            key={`${keyPrefix}-mention-${blockIdx++}`}
+            className={`rounded px-1 font-medium ${
+              isMe
+                ? "bg-[#F0A868]/25 text-[#F0A868]"
+                : "bg-[#5865F2]/20 text-[#8EA1FF] hover:bg-[#5865F2]/30"
+            }`}
+          >
+            @{label}
+          </span>,
+        );
+        continue;
+      }
+    }
     if (part.startsWith("```") && part.endsWith("```") && part.length >= 6) {
       const inner = part.slice(3, -3).replace(/^[a-zA-Z0-9_+-]*\n/, "");
       out.push(

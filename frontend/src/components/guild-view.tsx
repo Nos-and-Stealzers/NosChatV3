@@ -347,6 +347,8 @@ export function GuildView({
   const headerMenuRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionActiveIdx, setMentionActiveIdx] = useState(0);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const [guildEmoji, setGuildEmoji] = useState<GuildEmoji[]>([]);
@@ -395,9 +397,13 @@ export function GuildView({
   }, [guildEmoji]);
 
   function renderMessageContent(content: string) {
-    if (emojiByName.size === 0 || !content.includes(":")) return renderMarkdown(content);
+    const mdOpts = {
+      resolveMention: (uid: string) => (uid === myId ? "You" : (memberNames[uid] ?? null)),
+      currentUserId: myId,
+    };
+    if (emojiByName.size === 0 || !content.includes(":")) return renderMarkdown(content, "md", mdOpts);
     const parts = content.split(/(:[a-zA-Z0-9_]{2,32}:)/g);
-    if (parts.length === 1) return renderMarkdown(content);
+    if (parts.length === 1) return renderMarkdown(content, "md", mdOpts);
     return parts.map((part, i) => {
       const match = /^:([a-zA-Z0-9_]{2,32}):$/.exec(part);
       const em = match ? emojiByName.get(match[1]) : undefined;
@@ -412,7 +418,7 @@ export function GuildView({
           />
         );
       }
-      return <span key={i}>{renderMarkdown(part, `md-${i}`)}</span>;
+      return <span key={i}>{renderMarkdown(part, `md-${i}`, mdOpts)}</span>;
     });
   }
 
@@ -920,10 +926,68 @@ export function GuildView({
   }
 
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionQuery !== null) {
+      const candidates = mentionCandidates();
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionActiveIdx((i) => (i + 1) % Math.max(candidates.length, 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionActiveIdx((i) => (i - 1 + candidates.length) % Math.max(candidates.length, 1));
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && candidates.length > 0) {
+        e.preventDefault();
+        insertMention(candidates[mentionActiveIdx]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void handleSend(e as unknown as FormEvent);
     }
+  }
+
+  // Candidates for the open @mention popup: server members whose username
+  // or nickname starts with the typed query, capped at 6 like Discord's
+  // own autocomplete list.
+  function mentionCandidates(): GuildMember[] {
+    const q = (mentionQuery ?? "").toLowerCase();
+    return members
+      .filter((m) => {
+        const label = (m.nickname ?? m.username ?? m.email).toLowerCase();
+        return label.startsWith(q);
+      })
+      .slice(0, 6);
+  }
+
+  function insertMention(member: GuildMember) {
+    const el = composerRef.current;
+    const cursor = el?.selectionStart ?? composer.length;
+    const upToCursor = composer.slice(0, cursor);
+    const atMatch = /@([a-zA-Z0-9_]{0,32})$/.exec(upToCursor);
+    if (!atMatch) {
+      setMentionQuery(null);
+      return;
+    }
+    const start = atMatch.index;
+    const before = composer.slice(0, start);
+    const after = composer.slice(cursor);
+    const token = `<@${member.user_id}> `;
+    setComposer(before + token + after);
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      el?.focus();
+      const pos = before.length + token.length;
+      el?.setSelectionRange(pos, pos);
+    });
   }
 
   function startEditMessage(m: GuildMessage) {
@@ -1593,6 +1657,26 @@ export function GuildView({
             </div>
 
             <form onSubmit={handleSend} className="flex-none px-3 pb-4 md:px-6 md:pb-5">
+              {mentionQuery !== null && mentionCandidates().length > 0 && (
+                <div className="animate-rise-in mb-1.5 max-h-48 overflow-y-auto rounded-lg border border-[#2A2F3A] bg-[#161A20] p-1 shadow-xl">
+                  {mentionCandidates().map((m, i) => (
+                    <button
+                      key={m.user_id}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        insertMention(m);
+                      }}
+                      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${
+                        i === mentionActiveIdx ? "bg-[#2A2F3A] text-[#E8EAED]" : "text-[#C7CCD6] hover:bg-[#1E232C]"
+                      }`}
+                    >
+                      <ClickableAvatar userId={m.user_id} label={m.nickname ?? m.username ?? m.email} size="sm" />
+                      <span className="truncate">{m.nickname ?? m.username ?? m.email}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               {replyTarget && (
                 <div className="animate-rise-in mb-1.5 flex items-center gap-2 rounded-lg bg-[#1E232C] px-3 py-1.5 text-xs text-[#C7CCD6]">
                   <Reply className="size-3.5 shrink-0 -scale-x-100 text-[#8B93A1]" />
@@ -1663,8 +1747,20 @@ export function GuildView({
                   rows={1}
                   value={composer}
                   onChange={(e) => {
-                    setComposer(e.target.value);
-                    if (e.target.value.trim()) sendGuildTyping(guildId, activeChannel.id);
+                    const value = e.target.value;
+                    setComposer(value);
+                    if (value.trim()) sendGuildTyping(guildId, activeChannel.id);
+                    // @mention detection: look backward from the cursor for an
+                    // unterminated "@word" run (no space since the @).
+                    const cursor = e.target.selectionStart ?? value.length;
+                    const upToCursor = value.slice(0, cursor);
+                    const atMatch = /@([a-zA-Z0-9_]{0,32})$/.exec(upToCursor);
+                    if (atMatch) {
+                      setMentionQuery(atMatch[1]);
+                      setMentionActiveIdx(0);
+                    } else {
+                      setMentionQuery(null);
+                    }
                   }}
                   onKeyDown={handleComposerKeyDown}
                   placeholder={`Message #${activeChannel.name}`}
