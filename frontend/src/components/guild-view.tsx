@@ -87,6 +87,7 @@ import { Users } from "lucide-react";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ReactionBar } from "@/components/reaction-bar";
 import { usePresence } from "@/lib/presence-context";
+import { useSettings } from "@/lib/settings-context";
 import { ClickableAvatar } from "@/components/profile-card";
 
 function Avatar({
@@ -254,11 +255,16 @@ type ChannelGroup = {
   channels: GuildChannel[];
 };
 
-function groupChannels(categories: ChannelCategory[], channels: GuildChannel[]): ChannelGroup[] {
+function groupChannels(
+  categories: ChannelCategory[],
+  channels: GuildChannel[],
+  allowNsfw: boolean,
+): ChannelGroup[] {
   const sortedCats = [...categories].sort((a, b) => a.position - b.position);
   const groups: ChannelGroup[] = sortedCats.map((c) => ({ category: c, channels: [] }));
   const uncategorized: ChannelGroup = { category: null, channels: [] };
   for (const ch of [...channels].sort((a, b) => a.position - b.position)) {
+    if (ch.is_nsfw && !allowNsfw) continue;
     if (ch.category_id) {
       const g = groups.find((g) => g.category?.id === ch.category_id);
       if (g) {
@@ -293,6 +299,7 @@ export function GuildView({
   const { subscribe, sendGuildTyping } = useRealtime();
   const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleCamera, toggleScreenShare } = useVoice();
   const { fetchProfile } = usePresence();
+  const { settings } = useSettings();
   const handleContextMenu = useContextMenuHandler();
 
   const [detail, setDetail] = useState<GuildDetail | null>(null);
@@ -726,7 +733,7 @@ export function GuildView({
   // but enough to actually let you reorganize a channel list at all.
   async function handleMoveChannel(channel: GuildChannel, direction: "up" | "down") {
     if (!detail) return;
-    const groups = groupChannels(detail.categories, detail.channels);
+    const groups = groupChannels(detail.categories, detail.channels, true);
     const group = groups.find((g) => g.channels.some((c) => c.id === channel.id));
     if (!group) return;
     const idx = group.channels.findIndex((c) => c.id === channel.id);
@@ -874,7 +881,7 @@ export function GuildView({
   const canManageMessages = hasPermission(myPerms, PERMISSIONS.MANAGE_MESSAGES);
   const canKickMembers = hasPermission(myPerms, PERMISSIONS.KICK_MEMBERS);
   const canBanMembers = hasPermission(myPerms, PERMISSIONS.BAN_MEMBERS);
-  const groups = groupChannels(detail.categories, detail.channels);
+  const groups = groupChannels(detail.categories, detail.channels, canManageGuild || settings.allowNsfwChannels);
   const activeMessages = activeChannel ? (messagesByChannel[activeChannel.id] ?? []) : [];
   const inVoiceChannel = voice.channelId === activeChannel?.id;
 
