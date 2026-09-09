@@ -903,7 +903,24 @@ export function GuildView({
                       const presentUsers = voicePresence[ch.id] ?? [];
                       const channelUnread = unreadByChannel[ch.id] ?? 0;
                       return (
-                        <div key={ch.id} className="group/channel">
+                        <div
+                          key={ch.id}
+                          className="group/channel"
+                          onContextMenu={handleContextMenu(() => [
+                            { kind: "label" as const, label: ch.name },
+                            { kind: "item" as const, label: "Open Channel", onSelect: () => selectChannel(ch) },
+                            { kind: "item" as const, label: "Copy Channel ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(ch.id) },
+                            ...(canManageGuild
+                              ? [
+                                  { kind: "separator" as const },
+                                  { kind: "item" as const, label: "Move Up", icon: ArrowUp, onSelect: () => void handleMoveChannel(ch, "up") },
+                                  { kind: "item" as const, label: "Move Down", icon: ArrowDown, onSelect: () => void handleMoveChannel(ch, "down") },
+                                  { kind: "separator" as const },
+                                  { kind: "item" as const, label: "Delete Channel", icon: Trash2, danger: true, onSelect: () => setPendingDeleteChannel(ch) },
+                                ]
+                              : []),
+                          ])}
+                        >
                           <div
                             data-active={isActive}
                             className="group flex w-full items-center gap-1.5 rounded-lg pr-1 pl-2 text-left text-sm text-[#8B93A1] transition-colors hover:bg-[#1B1F27] hover:text-[#E8EAED] data-[active=true]:bg-[#1E232C] data-[active=true]:text-[#E8EAED]"

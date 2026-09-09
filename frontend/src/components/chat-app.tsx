@@ -1048,6 +1048,14 @@ export function ChatApp({
           }
           onSelectGuild={openGuildView}
           onOpenCreateJoin={() => setCreateJoinOpen(true)}
+          buildContextMenu={(g) => [
+            { kind: "label", label: g.name },
+            { kind: "item", label: "Open Server", onSelect: () => openGuildView(g.id) },
+            { kind: "item", label: "Server Settings", icon: Settings, onSelect: () => { openGuildView(g.id); setGuildSettingsOpen(true); } },
+            { kind: "separator" },
+            { kind: "item", label: "Copy Server ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(g.id) },
+            { kind: "item", label: "Mark as Read", onSelect: () => setUnreadByGuild((prev) => ({ ...prev, [g.id]: 0 })) },
+          ]}
         />
 
         <div className="mt-auto flex flex-col items-center gap-1">
@@ -1162,6 +1170,21 @@ export function ChatApp({
                   <button
                     key={dm.id}
                     onClick={() => openDmView(dm.id)}
+                    onContextMenu={handleContextMenu(() => [
+                      { kind: "label" as const, label },
+                      { kind: "item" as const, label: "Open Conversation", onSelect: () => openDmView(dm.id) },
+                      ...(dm.unread_count > 0
+                        ? [{ kind: "item" as const, label: "Mark as Read", onSelect: () => {
+                            void (async () => {
+                              const token = await getToken();
+                              if (token) void markDmRead(token, dm.id).catch(() => {});
+                            })();
+                          } }]
+                        : []),
+                      ...(dm.other_user_id
+                        ? [{ kind: "item" as const, label: "Copy User ID", icon: Hash, onSelect: () => void navigator.clipboard.writeText(dm.other_user_id!) }]
+                        : []),
+                    ])}
                     data-active={isActive}
                     className="group relative flex w-full items-center gap-2.5 overflow-hidden rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[#1B1F27] data-[active=true]:bg-[#1E232C] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#F0A868]/40"
                   >

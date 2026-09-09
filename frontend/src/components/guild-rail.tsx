@@ -10,6 +10,7 @@
 import { Plus } from "lucide-react";
 import { useState } from "react";
 import { guildIconUrl, type Guild } from "@/lib/backend-api";
+import { useContextMenuHandler, type ContextMenuItem } from "@/lib/context-menu";
 
 function guildInitial(name: string): string {
   return (name.trim()[0] ?? "?").toUpperCase();
@@ -21,13 +22,16 @@ function GuildIcon({
   compact,
   hasUnread,
   onClick,
+  buildContextMenu,
 }: {
   guild: Guild;
   active: boolean;
   compact: boolean;
   hasUnread: boolean;
   onClick: () => void;
+  buildContextMenu: (guild: Guild) => ContextMenuItem[];
 }) {
+  const handleContextMenu = useContextMenuHandler();
   // Every guild is tried as an image first (cheap 404 if none is set —
   // no extra "does this guild have an icon" round trip needed), falling
   // back to the color-swatch initial on load failure. Reset per guild id
@@ -37,6 +41,7 @@ function GuildIcon({
   return (
     <button
       onClick={onClick}
+      onContextMenu={handleContextMenu(() => buildContextMenu(guild))}
       data-active={active}
       title={guild.name}
       className={`group relative flex flex-none items-center justify-center overflow-hidden rounded-full font-display text-base text-[#12151A] shadow-[0_1px_0_rgba(255,255,255,0.25)_inset] transition-all duration-200 hover:rounded-xl data-[active=true]:rounded-xl ${compact ? "h-10 w-10" : "h-12 w-12"}`}
@@ -74,6 +79,7 @@ export function GuildRail({
   unreadGuildIds,
   onSelectGuild,
   onOpenCreateJoin,
+  buildContextMenu,
 }: {
   guilds: Guild[];
   activeGuildId: string | null;
@@ -81,6 +87,7 @@ export function GuildRail({
   unreadGuildIds?: Set<string>;
   onSelectGuild: (guildId: string) => void;
   onOpenCreateJoin: () => void;
+  buildContextMenu: (guild: Guild) => ContextMenuItem[];
 }) {
   return (
     <>
@@ -94,6 +101,7 @@ export function GuildRail({
             compact={compact}
             hasUnread={unreadGuildIds?.has(g.id) ?? false}
             onClick={() => onSelectGuild(g.id)}
+            buildContextMenu={buildContextMenu}
           />
         ))}
       </div>
