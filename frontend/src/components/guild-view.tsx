@@ -92,6 +92,8 @@ import {
 import { renderMarkdown } from "@/lib/render-markdown";
 import { useRealtime } from "@/lib/realtime-context";
 import { useVoice } from "@/lib/voice-context";
+import { useCall } from "@/lib/call-context";
+import { useDmVoice } from "@/lib/dm-voice-context";
 import { Users } from "lucide-react";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ReactionBar } from "@/components/reaction-bar";
@@ -316,6 +318,13 @@ export function GuildView({
   const { getToken } = useAuth();
   const { subscribe, sendGuildTyping } = useRealtime();
   const { voice, joinVoiceChannel, leaveVoiceChannel, toggleMic, toggleDeafen, toggleCamera, toggleScreenShare } = useVoice();
+  const { call } = useCall();
+  const { dmVoice } = useDmVoice();
+  // Same single-active-voice-connection rule as chat-app.tsx — don't let
+  // a user join a guild voice channel while already in a 1:1 call or a
+  // group DM call (two simultaneous live mic captures causes real audio
+  // feedback, not just a UI inconsistency).
+  const blockedByOtherVoice = call.status !== "idle" || dmVoice.dmId !== null;
   const { fetchProfile } = usePresence();
   const { settings } = useSettings();
   const handleContextMenu = useContextMenuHandler();
@@ -693,6 +702,10 @@ export function GuildView({
 
   function selectChannel(channel: GuildChannel) {
     if (channel.kind === "voice") {
+      if (blockedByOtherVoice) {
+        setActiveChannelId(channel.id);
+        return;
+      }
       void joinVoiceChannel(guildId, channel.id);
     }
     setActiveChannelId(channel.id);
@@ -1882,8 +1895,15 @@ export function GuildView({
             {!inVoiceChannel ? (
               <div className="flex flex-1 flex-col items-center justify-center gap-6 p-8">
                 <Volume2 className="size-12 text-[#8B93A1]/40" />
-                <p className="text-sm text-[#8B93A1]">Not connected to this voice channel</p>
-                <Button onClick={() => void joinVoiceChannel(guildId, activeChannel.id)}>
+                <p className="text-sm text-[#8B93A1]">
+                  {blockedByOtherVoice
+                    ? "You're already in another call — leave it first to join here."
+                    : "Not connected to this voice channel"}
+                </p>
+                <Button
+                  onClick={() => void joinVoiceChannel(guildId, activeChannel.id)}
+                  disabled={blockedByOtherVoice}
+                >
                   Join Voice
                 </Button>
               </div>

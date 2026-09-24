@@ -97,7 +97,7 @@ type PeerSession = {
 };
 
 export function VoiceProvider({ children }: { children: React.ReactNode }) {
-  const { subscribe, sendGuildSignal } = useRealtime();
+  const { subscribe, sendGuildSignal, connected } = useRealtime();
   const { settings } = useSettings();
   const settingsRef = useRef(settings);
   useEffect(() => {
@@ -542,6 +542,39 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renegotiateAllPeers]);
+
+  // If the underlying WebSocket drops and reconnects while we're still
+  // "in" a voice channel client-side, the backend has already silently
+  // torn down our server-side presence the moment the old socket closed
+  // (see ws.rs's disconnect cleanup) — so after reconnecting we'd sit
+  // there believing we're connected while every other participant's
+  // client no longer has any record of us, and we'd never get another
+  // `voice_channel_state`/offer to rebuild the mesh. Without this, a
+  // brief network blip anywhere in the app (not even related to the
+  // call) silently and permanently orphans the voice connection with no
+  // visible sign anything's wrong — exactly the "calls freak out when
+  // you navigate/do other things" failure mode. Detect the false->true
+  // reconnect transition and re-send voice_join so the server re-adds us
+  // and everyone re-negotiates fresh peer connections.
+  const wasConnectedRef = useRef(connected);
+  useEffect(() => {
+    const reconnected = connected && !wasConnectedRef.current;
+    wasConnectedRef.current = connected;
+    if (reconnected && channelIdRef.current) {
+      // Every old peer connection is now talking to a mesh the server no
+      // longer knows we're part of — tear them down (keeping the local
+      // mic/camera stream and UI state) and rejoin from scratch so fresh
+      // peer connections get built against the server's current view of
+      // who's actually in the channel.
+      for (const userId of Object.keys(peersRef.current)) {
+        teardownPeer(userId);
+      }
+      sendGuildSignal({ type: "voice_join", channel_id: channelIdRef.current });
+      if (micMutedRef.current) {
+        sendGuildSignal({ type: "voice_mute_state", channel_id: channelIdRef.current, muted: true });
+      }
+    }
+  }, [connected, sendGuildSignal, teardownPeer]);
 
   useEffect(() => {
     return subscribe(async (event: RealtimeEvent) => {

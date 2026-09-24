@@ -89,7 +89,7 @@ type PeerSession = {
 };
 
 export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
-  const { subscribe, sendDmVoiceSignal } = useRealtime();
+  const { subscribe, sendDmVoiceSignal, connected } = useRealtime();
   const { settings } = useSettings();
   const settingsRef = useRef(settings);
   useEffect(() => {
@@ -493,6 +493,25 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renegotiateAllPeers]);
+
+  // Same reconnect-orphan fix as voice-context.tsx — see its comment for
+  // the full explanation. A WS drop/reconnect anywhere in the app while
+  // in a group call silently desyncs us from the server's mesh presence
+  // without this.
+  const wasConnectedRef = useRef(connected);
+  useEffect(() => {
+    const reconnected = connected && !wasConnectedRef.current;
+    wasConnectedRef.current = connected;
+    if (reconnected && dmIdRef.current) {
+      for (const userId of Object.keys(peersRef.current)) {
+        teardownPeer(userId);
+      }
+      sendDmVoiceSignal({ type: "dm_voice_join", dm_id: dmIdRef.current });
+      if (micMutedRef.current) {
+        sendDmVoiceSignal({ type: "dm_voice_mute_state", dm_id: dmIdRef.current, muted: true });
+      }
+    }
+  }, [connected, sendDmVoiceSignal, teardownPeer]);
 
   useEffect(() => {
     return subscribe(async (event: RealtimeEvent) => {

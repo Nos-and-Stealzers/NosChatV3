@@ -81,6 +81,7 @@ import { useRealtime } from "@/lib/realtime-context";
 import { useSoundSettings } from "@/lib/use-sound-settings";
 import { useCall } from "@/lib/call-context";
 import { useDmVoice } from "@/lib/dm-voice-context";
+import { useVoice } from "@/lib/voice-context";
 import { renderMarkdown } from "@/lib/render-markdown";
 import { useSettings } from "@/lib/settings-context";
 import { SettingsPanel } from "@/components/settings-panel";
@@ -88,6 +89,7 @@ import { StaffPanel } from "@/components/staff-panel";
 import { IncomingCallToast } from "@/components/incoming-call-toast";
 import { CallPanel } from "@/components/call-panel";
 import { DmGroupCallPanel } from "@/components/dm-group-call-panel";
+import { VoiceStatusBar } from "@/components/voice-status-bar";
 import { GuildRail } from "@/components/guild-rail";
 import { CreateJoinGuildModal } from "@/components/create-join-guild-modal";
 import { GuildView } from "@/components/guild-view";
@@ -395,6 +397,20 @@ export function ChatApp({
   const sound = useSoundSettings();
   const { call, startCall, webrtcDebug } = useCall();
   const { dmVoice, joinDmVoice } = useDmVoice();
+  const { voice } = useVoice();
+  // Discord allows exactly one active voice/video connection at a time —
+  // joining a second (guild voice channel, group call, or 1:1 call) while
+  // already in one would open a second live mic/camera capture alongside
+  // the first, causing real audio feedback/double-transmission rather
+  // than a UI-only glitch. This is the single source of truth every
+  // "start/join a call" action below checks before proceeding.
+  const inAnyVoiceConnection = call.status !== "idle" || dmVoice.dmId !== null || voice.channelId !== null;
+  function blockedVoiceReason(): string | null {
+    if (call.status !== "idle") return "You're already in a call. Hang up first.";
+    if (dmVoice.dmId !== null) return "You're already in a group call. Leave it first.";
+    if (voice.channelId !== null) return "You're already connected to a voice channel. Disconnect first.";
+    return null;
+  }
   const { settings } = useSettings();
 
   const [myId, setMyId] = useState<string | null>(null);
@@ -1810,7 +1826,7 @@ export function ChatApp({
                     <Button
                       size="icon-sm"
                       variant="ghost"
-                      disabled={!connected || dmVoice.dmId !== null}
+                      disabled={!connected || inAnyVoiceConnection}
                       onClick={() => void joinDmVoice(view.dmId, false)}
                       title="Start group voice call"
                     >
@@ -1819,7 +1835,7 @@ export function ChatApp({
                     <Button
                       size="icon-sm"
                       variant="ghost"
-                      disabled={!connected || dmVoice.dmId !== null}
+                      disabled={!connected || inAnyVoiceConnection}
                       onClick={() => void joinDmVoice(view.dmId, true)}
                       title="Start group video call"
                     >
@@ -1851,7 +1867,7 @@ export function ChatApp({
                 <Button
                   size="icon-sm"
                   variant="ghost"
-                  disabled={!connected || call.status !== "idle" || !activeDm?.other_user_id}
+                  disabled={!connected || inAnyVoiceConnection || !activeDm?.other_user_id}
                   onClick={() =>
                     activeDm?.other_user_id &&
                     void startCall(view.dmId, activeDm.other_user_id, "voice")
@@ -1863,7 +1879,7 @@ export function ChatApp({
                 <Button
                   size="icon-sm"
                   variant="ghost"
-                  disabled={!connected || call.status !== "idle" || !activeDm?.other_user_id}
+                  disabled={!connected || inAnyVoiceConnection || !activeDm?.other_user_id}
                   onClick={() =>
                     activeDm?.other_user_id &&
                     void startCall(view.dmId, activeDm.other_user_id, "video")
@@ -2426,6 +2442,13 @@ export function ChatApp({
       <IncomingCallToast peerLabel={resolvePeerLabel(call.peerUserId)} />
       <CallPanel peerLabel={resolvePeerLabel(call.peerUserId)} />
       <DmGroupCallPanel dmId={dmVoice.dmId} nameFor={resolvePeerLabel} myLabel={displayName} />
+      <VoiceStatusBar
+        channelName={null}
+        guildName={guilds.find((g) => g.id === voice.guildId)?.name ?? null}
+        onReturn={() => {
+          if (voice.guildId) openGuildView(voice.guildId);
+        }}
+      />
 
       <ConfirmModal
         open={pendingDeleteMessage !== null}

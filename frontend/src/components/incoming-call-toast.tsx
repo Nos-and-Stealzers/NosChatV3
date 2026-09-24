@@ -6,8 +6,11 @@
 // existing amber/near-black language and reuses the rise-in keyframe
 // already defined in globals.css.
 
+import { useEffect } from "react";
 import { Phone, PhoneOff, Video } from "lucide-react";
 import { useCall } from "@/lib/call-context";
+import { useVoice } from "@/lib/voice-context";
+import { useDmVoice } from "@/lib/dm-voice-context";
 
 function Avatar({ seed, label }: { seed: string; label: string }) {
   // Mirrors chat-app.tsx's Avatar component's visual language without a
@@ -34,8 +37,23 @@ export function IncomingCallToast({
   peerLabel: string;
 }) {
   const { call, acceptCall, rejectCall } = useCall();
+  const { voice } = useVoice();
+  const { dmVoice } = useDmVoice();
+  const busyElsewhere = voice.channelId !== null || dmVoice.dmId !== null;
 
-  if (call.status !== "ringing-incoming") return null;
+  // Auto-decline instead of leaving the caller ringing forever if we're
+  // already tied up in a guild voice channel or a group call — those two
+  // can't reach call-context.tsx's own idle-state guard (it only knows
+  // about 1:1 calls), so without this a ring would sit there showing
+  // Accept/Decline for a call joining it would actually be blocked, while
+  // the caller keeps hearing it ring with no signal that we're busy.
+  useEffect(() => {
+    if (call.status === "ringing-incoming" && busyElsewhere) {
+      rejectCall();
+    }
+  }, [call.status, busyElsewhere, rejectCall]);
+
+  if (call.status !== "ringing-incoming" || busyElsewhere) return null;
 
   return (
     <div className="animate-rise-in fixed left-1/2 top-4 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2">

@@ -1,25 +1,29 @@
 "use client";
 
 // Floating panel for an active GROUP DM voice/video call — the N-peer
-// analogue of call-panel.tsx's 1:1 UI, using dm-voice-context.tsx's mesh
-// state instead of call-context.tsx's single-peer state. Rendered at the
-// chat-app.tsx top level (same as CallPanel) so it survives navigating
-// between DMs while a call is active.
+// analogue of call-panel.tsx's compact 1:1 UI, using dm-voice-context.tsx's
+// mesh state instead of call-context.tsx's single-peer state. Rendered at
+// chat-app.tsx's top level (same as CallPanel) so both the UI and the
+// underlying WebRTC connections survive navigating anywhere else in the
+// app — different DM, a guild, a game, settings, whatever's rendered
+// underneath never unmounts this or the DmVoiceProvider above it.
+//
+// Sized to match Discord's actual floating-call behavior: a small pill by
+// default, expanding only to a capped, modest tile grid — never a large
+// fraction of the screen.
 
 import { useEffect, useRef, useState } from "react";
-import { Mic, MicOff, Headphones, Video, VideoOff, ScreenShare, PhoneOff, Users } from "lucide-react";
+import { Mic, MicOff, Headphones, Video, VideoOff, ScreenShare, PhoneOff, Users, ChevronDown, ChevronUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useDmVoice } from "@/lib/dm-voice-context";
 
 function GroupCallTile({
-  seed,
   label,
   stream,
   isLocal = false,
   micMuted = false,
   deafened = false,
 }: {
-  seed: string;
   label: string;
   stream: MediaStream | null | undefined;
   isLocal?: boolean;
@@ -28,7 +32,7 @@ function GroupCallTile({
 }) {
   const hasVideo = !!stream?.getVideoTracks().length;
   return (
-    <div className="relative flex aspect-video min-h-[120px] flex-col items-center justify-center overflow-hidden rounded-xl border border-[#2A2F3A] bg-[#12151B]">
+    <div className="relative flex aspect-video h-20 flex-col items-center justify-center overflow-hidden rounded-lg border border-[#2A2F3A] bg-[#12151B]">
       {hasVideo && stream ? (
         // eslint-disable-next-line jsx-a11y/media-has-caption -- group call video, no captions applicable
         <video
@@ -41,7 +45,7 @@ function GroupCallTile({
           }}
         />
       ) : (
-        <div className="flex size-14 items-center justify-center rounded-full bg-[#1E232C] text-lg font-semibold text-[#E8EAED]">
+        <div className="flex size-8 items-center justify-center rounded-full bg-[#1E232C] text-xs font-semibold text-[#E8EAED]">
           {label.slice(0, 1).toUpperCase()}
         </div>
       )}
@@ -55,13 +59,13 @@ function GroupCallTile({
           }}
         />
       )}
-      <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1.5 rounded-md bg-black/55 px-2 py-1 backdrop-blur-sm">
+      <div className="absolute bottom-1 left-1 flex items-center gap-1 rounded bg-black/55 px-1.5 py-0.5 backdrop-blur-sm">
         {micMuted ? (
-          <MicOff className="size-3 flex-none text-[#EB5757]" />
+          <MicOff className="size-2.5 flex-none text-[#EB5757]" />
         ) : (
-          <Mic className="size-3 flex-none text-[#8B93A1]" />
+          <Mic className="size-2.5 flex-none text-[#8B93A1]" />
         )}
-        <span className="max-w-[8rem] truncate text-[11px] font-medium text-[#E8EAED]">{label}</span>
+        <span className="max-w-[5rem] truncate text-[9px] font-medium text-[#E8EAED]">{label}</span>
       </div>
     </div>
   );
@@ -77,7 +81,9 @@ export function DmGroupCallPanel({
   myLabel: string;
 }) {
   const { dmVoice, leaveDmVoice, toggleDmMic, toggleDmDeafen, toggleDmCamera, toggleDmScreenShare } = useDmVoice();
-  const [expanded, setExpanded] = useState(true);
+  // Compact by default — matches Discord's small floating call bar rather
+  // than a large always-open tile grid.
+  const [showTiles, setShowTiles] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -93,34 +99,16 @@ export function DmGroupCallPanel({
   const peerIds = Object.keys(dmVoice.peers);
 
   return (
-    <div
-      className={`fixed bottom-4 right-4 z-40 flex flex-col overflow-hidden rounded-2xl border border-[#2A2F3A] bg-[#0F1217] shadow-2xl transition-all ${
-        expanded ? "w-[420px]" : "w-64"
-      }`}
-    >
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="flex items-center gap-2 border-b border-[#1D2129] px-3 py-2 text-left"
-      >
-        <Users className="size-4 text-[#8B93A1]" />
-        <span className="flex-1 truncate text-xs font-semibold text-[#E8EAED]">
-          Group call · {peerIds.length + 1} {peerIds.length === 0 ? "person" : "people"}
-        </span>
-      </button>
-
-      {expanded && (
-        <div className="grid grid-cols-2 gap-1.5 p-2">
-          <GroupCallTile
-            seed="me"
-            label={myLabel}
-            stream={dmVoice.localStream}
-            isLocal
-            micMuted={dmVoice.micMuted}
-          />
+    <div className="animate-rise-in fixed bottom-4 right-[19.5rem] z-40 w-72 overflow-hidden rounded-2xl border border-[#2A2F3A] bg-[#0F1217] shadow-2xl">
+      {showTiles && (
+        // Capped-size grid — at most 2 columns of small fixed-height
+        // tiles with internal scroll for larger calls, never growing to
+        // dominate the screen regardless of participant count.
+        <div className="grid max-h-56 grid-cols-2 gap-1.5 overflow-y-auto p-2">
+          <GroupCallTile label={myLabel} stream={dmVoice.localStream} isLocal micMuted={dmVoice.micMuted} />
           {peerIds.map((userId) => (
             <GroupCallTile
               key={userId}
-              seed={userId}
               label={nameFor(userId)}
               stream={dmVoice.peers[userId]?.stream}
               micMuted={dmVoice.peers[userId]?.micMuted ?? false}
@@ -129,6 +117,21 @@ export function DmGroupCallPanel({
           ))}
         </div>
       )}
+
+      <button
+        onClick={() => setShowTiles((v) => !v)}
+        className="flex w-full items-center gap-2 border-t border-[#1D2129] px-3 py-2 text-left first:border-t-0"
+      >
+        <Users className="size-3.5 flex-none text-[#8B93A1]" />
+        <span className="flex-1 truncate text-xs font-semibold text-[#E8EAED]">
+          Group call · {peerIds.length + 1} {peerIds.length === 0 ? "person" : "people"}
+        </span>
+        {showTiles ? (
+          <ChevronDown className="size-3.5 flex-none text-[#8B93A1]" />
+        ) : (
+          <ChevronUp className="size-3.5 flex-none text-[#8B93A1]" />
+        )}
+      </button>
 
       <div className="flex items-center justify-center gap-1.5 border-t border-[#1D2129] px-3 py-2">
         <Button size="icon-sm" variant="ghost" onClick={toggleDmMic} title={dmVoice.micMuted ? "Unmute" : "Mute"}>
