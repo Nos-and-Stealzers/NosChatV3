@@ -123,7 +123,7 @@ export function DmGroupCallPanel({
               seed={userId}
               label={nameFor(userId)}
               stream={dmVoice.peers[userId]?.stream}
-              micMuted={dmVoice.peers[userId]?.connectionState !== "connected"}
+              micMuted={dmVoice.peers[userId]?.micMuted ?? false}
               deafened={dmVoice.deafened}
             />
           ))}

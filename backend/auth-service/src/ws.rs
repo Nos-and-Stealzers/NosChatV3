@@ -180,6 +180,12 @@ enum ClientEvent {
     /// their camera" without inspecting track metadata, which WebRTC
     /// doesn't expose reliably cross-browser.
     VoiceScreenShareState { channel_id: Uuid, sharing: bool },
+    /// Broadcast-to-channel notice that a participant muted/unmuted their
+    /// mic. Purely informational for other clients' UI (which tile shows a
+    /// muted icon) — actual audio suppression already happens locally via
+    /// disabling the outgoing track, so a dropped/late event here never
+    /// causes anyone to actually hear audio they shouldn't.
+    VoiceMuteState { channel_id: Uuid, muted: bool },
     VoiceOffer { channel_id: Uuid, to: Uuid, sdp: Value },
     VoiceAnswer { channel_id: Uuid, to: Uuid, sdp: Value },
     VoiceIceCandidate { channel_id: Uuid, to: Uuid, candidate: Value },
@@ -193,6 +199,8 @@ enum ClientEvent {
     DmVoiceJoin { dm_id: Uuid },
     DmVoiceLeave { dm_id: Uuid },
     DmVoiceScreenShareState { dm_id: Uuid, sharing: bool },
+    /// Group-DM analogue of VoiceMuteState above.
+    DmVoiceMuteState { dm_id: Uuid, muted: bool },
     DmVoiceOffer { dm_id: Uuid, to: Uuid, sdp: Value },
     DmVoiceAnswer { dm_id: Uuid, to: Uuid, sdp: Value },
     DmVoiceIceCandidate { dm_id: Uuid, to: Uuid, candidate: Value },
@@ -430,6 +438,20 @@ async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent
             });
             state.ws_hub.send_to_many(&others, payload).await;
         }
+        ClientEvent::VoiceMuteState { channel_id, muted } => {
+            if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {
+                return;
+            }
+            let members = state.ws_hub.voice_members(channel_id).await;
+            let others: Vec<Uuid> = members.into_iter().filter(|id| *id != user_id).collect();
+            let payload = json!({
+                "type": "voice_mute_state",
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "muted": muted,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
         ClientEvent::VoiceOffer { channel_id, to, sdp } => {
             if !state.ws_hub.is_in_voice_channel(channel_id, user_id).await {
                 return;
@@ -513,6 +535,20 @@ async fn handle_client_event(state: &AppState, user_id: Uuid, event: ClientEvent
                 "dm_id": dm_id,
                 "user_id": user_id,
                 "sharing": sharing,
+            });
+            state.ws_hub.send_to_many(&others, payload).await;
+        }
+        ClientEvent::DmVoiceMuteState { dm_id, muted } => {
+            if !state.ws_hub.is_in_voice_channel(dm_id, user_id).await {
+                return;
+            }
+            let members = state.ws_hub.voice_members(dm_id).await;
+            let others: Vec<Uuid> = members.into_iter().filter(|id| *id != user_id).collect();
+            let payload = json!({
+                "type": "dm_voice_mute_state",
+                "dm_id": dm_id,
+                "user_id": user_id,
+                "muted": muted,
             });
             state.ws_hub.send_to_many(&others, payload).await;
         }

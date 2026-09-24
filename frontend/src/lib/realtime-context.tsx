@@ -92,6 +92,7 @@ export type RealtimeEvent =
   | { type: "voice_user_joined"; channel_id: string; user_id: string }
   | { type: "voice_user_left"; channel_id: string; user_id: string }
   | { type: "voice_screen_share_state"; channel_id: string; user_id: string; sharing: boolean }
+  | { type: "voice_mute_state"; channel_id: string; user_id: string; muted: boolean }
   | {
       type: "voice_offer";
       channel_id: string;
@@ -117,6 +118,7 @@ export type RealtimeEvent =
   | { type: "dm_voice_user_joined"; dm_id: string; user_id: string }
   | { type: "dm_voice_user_left"; dm_id: string; user_id: string }
   | { type: "dm_voice_screen_share_state"; dm_id: string; user_id: string; sharing: boolean }
+  | { type: "dm_voice_mute_state"; dm_id: string; user_id: string; muted: boolean }
   | {
       type: "dm_voice_offer";
       dm_id: string;
@@ -154,6 +156,7 @@ export type GuildVoiceSignal =
   | { type: "voice_join"; channel_id: string }
   | { type: "voice_leave"; channel_id: string }
   | { type: "voice_screen_share_state"; channel_id: string; sharing: boolean }
+  | { type: "voice_mute_state"; channel_id: string; muted: boolean }
   | { type: "voice_offer"; channel_id: string; to: string; sdp: RTCSessionDescriptionInit }
   | { type: "voice_answer"; channel_id: string; to: string; sdp: RTCSessionDescriptionInit }
   | {
@@ -170,6 +173,7 @@ export type DmVoiceSignal =
   | { type: "dm_voice_join"; dm_id: string }
   | { type: "dm_voice_leave"; dm_id: string }
   | { type: "dm_voice_screen_share_state"; dm_id: string; sharing: boolean }
+  | { type: "dm_voice_mute_state"; dm_id: string; muted: boolean }
   | { type: "dm_voice_offer"; dm_id: string; to: string; sdp: RTCSessionDescriptionInit }
   | { type: "dm_voice_answer"; dm_id: string; to: string; sdp: RTCSessionDescriptionInit }
   | {

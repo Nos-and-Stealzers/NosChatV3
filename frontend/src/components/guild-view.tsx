@@ -1916,7 +1916,7 @@ export function GuildView({
                               seed={userId}
                               label={nameFor(userId)}
                               stream={peer.stream}
-                              micMuted={peer.connectionState !== "connected"}
+                              micMuted={peer.micMuted}
                               deafened={voice.deafened}
                             />
                           ))}
@@ -1948,7 +1948,7 @@ export function GuildView({
                               seed={spotlightId}
                               label={nameFor(spotlightId)}
                               stream={voice.peers[spotlightId]?.stream}
-                              micMuted={voice.peers[spotlightId]?.connectionState !== "connected"}
+                              micMuted={voice.peers[spotlightId]?.micMuted ?? false}
                               deafened={voice.deafened}
                               spotlight
                               screenSharing
@@ -1974,7 +1974,7 @@ export function GuildView({
                                     seed={p.id}
                                     label={nameFor(p.id)}
                                     stream={voice.peers[p.id]?.stream}
-                                    micMuted={voice.peers[p.id]?.connectionState !== "connected"}
+                                    micMuted={voice.peers[p.id]?.micMuted ?? false}
                                     deafened={voice.deafened}
                                   />
                                 </div>

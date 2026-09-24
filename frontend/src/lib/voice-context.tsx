@@ -38,6 +38,7 @@ import { useSettings } from "@/lib/settings-context";
 export type VoicePeerState = {
   stream: MediaStream | null;
   connectionState: string;
+  micMuted: boolean;
 };
 
 export type VoiceState = {
@@ -170,7 +171,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
         ...prev,
         peers: {
           ...prev.peers,
-          [remoteUserId]: { stream: null, connectionState: pc.connectionState },
+          [remoteUserId]: { stream: null, connectionState: pc.connectionState, micMuted: false },
         },
       }));
 
@@ -195,6 +196,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
             [remoteUserId]: {
               stream: stream ?? prev.peers[remoteUserId]?.stream ?? null,
               connectionState: pc.connectionState,
+              micMuted: prev.peers[remoteUserId]?.micMuted ?? false,
             },
           },
         }));
@@ -292,6 +294,9 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           localStream: stream,
         });
         sendGuildSignal({ type: "voice_join", channel_id: channelId });
+        if (micMutedRef.current) {
+          sendGuildSignal({ type: "voice_mute_state", channel_id: channelId, muted: true });
+        }
       } catch (e) {
         console.warn("voice: failed to access microphone", e);
         teardownAll();
@@ -314,7 +319,10 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     stream.getAudioTracks().forEach((t) => (t.enabled = !nextMuted));
     micMutedRef.current = nextMuted;
     setVoice((prev) => ({ ...prev, micMuted: nextMuted }));
-  }, []);
+    if (channelIdRef.current) {
+      sendGuildSignal({ type: "voice_mute_state", channel_id: channelIdRef.current, muted: nextMuted });
+    }
+  }, [sendGuildSignal]);
 
   // Deafen mutes ALL incoming peer audio (every remote track across every
   // peer connection) — distinct from mic mute, matching Discord: deafening
@@ -343,7 +351,14 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
       micMutedRef.current = restoreMuted;
     }
     setVoice((prev) => ({ ...prev, deafened: nextDeafened, micMuted: micMutedRef.current }));
-  }, []);
+    if (channelIdRef.current) {
+      sendGuildSignal({
+        type: "voice_mute_state",
+        channel_id: channelIdRef.current,
+        muted: micMutedRef.current,
+      });
+    }
+  }, [sendGuildSignal]);
 
   // Renegotiates every existing peer connection after the local track set
   // changes (camera on/off) — required because WebRTC only auto-includes
@@ -403,6 +418,27 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
+      // Mirror toggleScreenShare's mutual exclusion: only one video track
+      // slot is ever sent, so turning the camera on while a screen share is
+      // live must replace that track, not add a second simultaneous one
+      // (which would otherwise leave a stale screen-share track alongside
+      // the new camera track and desync `screenSharing` from what's
+      // actually being sent to peers).
+      if (screenSharingRef.current) {
+        const stream = localStreamRef.current;
+        const shareTrack = stream?.getVideoTracks()[0];
+        if (shareTrack) {
+          shareTrack.stop();
+          stream?.removeTrack(shareTrack);
+        }
+        for (const session of Object.values(peersRef.current)) {
+          const sender = session.pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender) session.pc.removeTrack(sender);
+        }
+        screenSharingRef.current = false;
+        sendGuildSignal({ type: "voice_screen_share_state", channel_id: channelId, sharing: false });
+      }
+
       const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
       const [videoTrack] = videoStream.getVideoTracks();
       const stream = localStreamRef.current;
@@ -415,12 +451,17 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
         session.pc.addTrack(videoTrack, localStreamRef.current!);
       }
       cameraOnRef.current = true;
-      setVoice((prev) => ({ ...prev, cameraOn: true, localStream: localStreamRef.current }));
+      setVoice((prev) => ({
+        ...prev,
+        cameraOn: true,
+        screenSharing: false,
+        localStream: localStreamRef.current,
+      }));
       await renegotiateAllPeers(channelId);
     } catch (e) {
       console.warn("voice: failed to access camera", e);
     }
-  }, [renegotiateAllPeers]);
+  }, [renegotiateAllPeers, sendGuildSignal]);
 
   // Screen share reuses the SAME video track "slot" as the camera (mutually
   // exclusive — matches most lightweight WebRTC apps and keeps the peer
@@ -537,6 +578,21 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
               ? [...prev.screenSharingPeerIds.filter((id) => id !== event.user_id), event.user_id]
               : prev.screenSharingPeerIds.filter((id) => id !== event.user_id),
           }));
+          break;
+        }
+        case "voice_mute_state": {
+          if (event.channel_id !== channelIdRef.current) return;
+          setVoice((prev) => {
+            const existing = prev.peers[event.user_id];
+            if (!existing) return prev;
+            return {
+              ...prev,
+              peers: {
+                ...prev.peers,
+                [event.user_id]: { ...existing, micMuted: event.muted },
+              },
+            };
+          });
           break;
         }
         case "voice_offer": {

@@ -33,6 +33,7 @@ import { useSettings } from "@/lib/settings-context";
 export type DmVoicePeerState = {
   stream: MediaStream | null;
   connectionState: string;
+  micMuted: boolean;
 };
 
 export type DmVoiceState = {
@@ -159,7 +160,7 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
         ...prev,
         peers: {
           ...prev.peers,
-          [remoteUserId]: { stream: null, connectionState: pc.connectionState },
+          [remoteUserId]: { stream: null, connectionState: pc.connectionState, micMuted: false },
         },
       }));
 
@@ -184,6 +185,7 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
             [remoteUserId]: {
               stream: stream ?? prev.peers[remoteUserId]?.stream ?? null,
               connectionState: pc.connectionState,
+              micMuted: prev.peers[remoteUserId]?.micMuted ?? false,
             },
           },
         }));
@@ -280,6 +282,9 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
           localStream: stream,
         });
         sendDmVoiceSignal({ type: "dm_voice_join", dm_id: dmId });
+        if (micMutedRef.current) {
+          sendDmVoiceSignal({ type: "dm_voice_mute_state", dm_id: dmId, muted: true });
+        }
       } catch (e) {
         console.warn("dm-voice: failed to access mic/camera", e);
         teardownAll();
@@ -302,7 +307,10 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
     stream.getAudioTracks().forEach((t) => (t.enabled = !nextMuted));
     micMutedRef.current = nextMuted;
     setDmVoice((prev) => ({ ...prev, micMuted: nextMuted }));
-  }, []);
+    if (dmIdRef.current) {
+      sendDmVoiceSignal({ type: "dm_voice_mute_state", dm_id: dmIdRef.current, muted: nextMuted });
+    }
+  }, [sendDmVoiceSignal]);
 
   const toggleDmDeafen = useCallback(() => {
     const nextDeafened = !deafenedRef.current;
@@ -324,7 +332,14 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
       micMutedRef.current = restoreMuted;
     }
     setDmVoice((prev) => ({ ...prev, deafened: nextDeafened, micMuted: micMutedRef.current }));
-  }, []);
+    if (dmIdRef.current) {
+      sendDmVoiceSignal({
+        type: "dm_voice_mute_state",
+        dm_id: dmIdRef.current,
+        muted: micMutedRef.current,
+      });
+    }
+  }, [sendDmVoiceSignal]);
 
   const renegotiateAllPeers = useCallback(
     async (dmId: string) => {
@@ -368,6 +383,27 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
+      // Mirror toggleDmScreenShare's mutual exclusion: a peer can only send
+      // one video track at a time, so switching the camera on while a
+      // screen share is live must replace it rather than add a second
+      // simultaneous video track (which would otherwise leave a stale
+      // screen-share track alongside the new camera track and desync the
+      // reported `screenSharing` state from what's actually being sent).
+      if (screenSharingRef.current) {
+        const stream = localStreamRef.current;
+        const shareTrack = stream?.getVideoTracks()[0];
+        if (shareTrack) {
+          shareTrack.stop();
+          stream?.removeTrack(shareTrack);
+        }
+        for (const session of Object.values(peersRef.current)) {
+          const sender = session.pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender) session.pc.removeTrack(sender);
+        }
+        screenSharingRef.current = false;
+        sendDmVoiceSignal({ type: "dm_voice_screen_share_state", dm_id: dmId, sharing: false });
+      }
+
       const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
       const [videoTrack] = videoStream.getVideoTracks();
       const stream = localStreamRef.current;
@@ -380,12 +416,17 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
         session.pc.addTrack(videoTrack, localStreamRef.current!);
       }
       cameraOnRef.current = true;
-      setDmVoice((prev) => ({ ...prev, cameraOn: true, localStream: localStreamRef.current }));
+      setDmVoice((prev) => ({
+        ...prev,
+        cameraOn: true,
+        screenSharing: false,
+        localStream: localStreamRef.current,
+      }));
       await renegotiateAllPeers(dmId);
     } catch (e) {
       console.warn("dm-voice: failed to access camera", e);
     }
-  }, [renegotiateAllPeers]);
+  }, [renegotiateAllPeers, sendDmVoiceSignal]);
 
   const toggleDmScreenShare = useCallback(async () => {
     const dmId = dmIdRef.current;
@@ -485,6 +526,21 @@ export function DmVoiceProvider({ children }: { children: React.ReactNode }) {
               ? [...prev.screenSharingPeerIds.filter((id) => id !== event.user_id), event.user_id]
               : prev.screenSharingPeerIds.filter((id) => id !== event.user_id),
           }));
+          break;
+        }
+        case "dm_voice_mute_state": {
+          if (event.dm_id !== dmIdRef.current) return;
+          setDmVoice((prev) => {
+            const existing = prev.peers[event.user_id];
+            if (!existing) return prev;
+            return {
+              ...prev,
+              peers: {
+                ...prev.peers,
+                [event.user_id]: { ...existing, micMuted: event.muted },
+              },
+            };
+          });
           break;
         }
         case "dm_voice_offer": {
