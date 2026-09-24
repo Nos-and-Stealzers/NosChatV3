@@ -1,4 +1,5 @@
 mod clerk;
+mod attachment_safety;
 mod dms;
 mod friends;
 mod gifs;

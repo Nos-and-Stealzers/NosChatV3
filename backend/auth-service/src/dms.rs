@@ -608,6 +608,35 @@ async fn assert_participant(state: &AppState, dm_id: Uuid, user_id: Uuid) -> Res
     Ok(())
 }
 
+/// Blocking someone was always meant to stop them from being able to DM
+/// you (see the comment on friends::block_user) — but that was only ever
+/// enforced when *opening a new* DM. An existing thread from before the
+/// block stayed a fully live channel, letting a blocked user keep sending
+/// messages into it indefinitely; nothing checked block status on send.
+/// Used to gate `send_message` in addition to `assert_participant`.
+async fn assert_not_blocked_in_dm(state: &AppState, dm_id: Uuid, sender_id: Uuid) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let others: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM dm_participants WHERE dm_id = $1 AND user_id <> $2",
+    )
+    .bind(dm_id)
+    .bind(sender_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_err)?;
+    for (other_id,) in others {
+        if crate::friends::is_blocked_either_way(state, sender_id, other_id)
+            .await
+            .map_err(internal_err)?
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "can't send messages here — blocked" })),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `GET /dms/:id/messages` — most recent 50, oldest first.
 pub async fn list_messages(
     State(state): State<AppState>,
@@ -894,6 +923,7 @@ pub async fn send_message(
 ) -> Result<Json<MessageView>, (StatusCode, Json<serde_json::Value>)> {
     let me = local_user_id(&state, &claims.sub).await?;
     assert_participant(&state, dm_id, me).await?;
+    assert_not_blocked_in_dm(&state, dm_id, me).await?;
 
     let mut content = String::new();
     let mut attachment: Option<(Vec<u8>, String, String)> = None; // (bytes, mime, filename)
@@ -1032,11 +1062,12 @@ pub async fn get_attachment(
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "no attachment" }))).into_response();
     };
 
-    let disposition = format!("inline; filename=\"{}\"", filename.replace('"', ""));
+    let disposition_headers = crate::attachment_safety::safe_attachment_headers(&mime, &filename);
     (
         [
-            (axum::http::header::CONTENT_TYPE, mime),
-            (axum::http::header::CONTENT_DISPOSITION, disposition),
+            (axum::http::header::CONTENT_TYPE, disposition_headers.0),
+            (axum::http::header::CONTENT_DISPOSITION, disposition_headers.1),
+            crate::attachment_safety::nosniff_header(),
         ],
         data,
     )

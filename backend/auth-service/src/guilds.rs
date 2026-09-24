@@ -1007,7 +1007,21 @@ pub async fn get_guild_icon(
     };
 
     let mime = mime.unwrap_or_else(|| "image/png".to_string());
-    Ok(([(header::CONTENT_TYPE, mime)], bytes))
+    // Guild icons must always be images — an attacker-declared
+    // Content-Type served back untouched is the same stored-XSS class
+    // documented in attachment_safety.rs, just for a `<img src>`-style
+    // endpoint instead of a message attachment.
+    let safe_mime = match mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/bmp" | "image/x-icon" => mime,
+        _ => "image/png".to_string(),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, safe_mime),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        bytes,
+    ))
 }
 
 const MAX_EMOJI_BYTES: usize = 32 * 1024; // 32KB — small on purpose, these render inline in text
@@ -1161,7 +1175,17 @@ pub async fn get_emoji_image(
         return Err(not_found("emoji not found"));
     };
 
-    Ok(([(header::CONTENT_TYPE, mime)], bytes))
+    let safe_mime = match mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/bmp" => mime,
+        _ => "image/png".to_string(),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, safe_mime),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        bytes,
+    ))
 }
 
 /// `DELETE /guilds/:id` — owner only, not just MANAGE_GUILD.
@@ -2020,11 +2044,12 @@ pub async fn get_channel_attachment(
         return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "no attachment" }))));
     };
 
-    let disposition = format!("inline; filename=\"{}\"", filename.replace('"', ""));
+    let disposition_headers = crate::attachment_safety::safe_attachment_headers(&mime, &filename);
     Ok((
         [
-            (axum::http::header::CONTENT_TYPE, mime),
-            (axum::http::header::CONTENT_DISPOSITION, disposition),
+            (axum::http::header::CONTENT_TYPE, disposition_headers.0),
+            (axum::http::header::CONTENT_DISPOSITION, disposition_headers.1),
+            crate::attachment_safety::nosniff_header(),
         ],
         data,
     ))

@@ -251,5 +251,23 @@ pub async fn get_custom_file(
     };
 
     let mime = mime.unwrap_or_else(|| "audio/mpeg".to_string());
-    Ok(([(header::CONTENT_TYPE, mime)], bytes))
+    // Enforce a real allowlist rather than trusting whatever the uploader
+    // claimed — same stored-XSS class as chat attachments (see
+    // attachment_safety.rs). Custom notification sounds are only ever
+    // meant to be audio; anything else served back with an attacker-
+    // controlled Content-Type and no Content-Disposition is a real
+    // same-origin script-execution risk if a browser is coaxed into
+    // treating the response as HTML.
+    let safe_mime = match mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/ogg" | "audio/webm" | "audio/x-wav" => mime,
+        _ => "audio/mpeg".to_string(),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, safe_mime),
+            (header::CONTENT_DISPOSITION, "inline".to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        bytes,
+    ))
 }
